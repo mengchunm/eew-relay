@@ -25,6 +25,7 @@
 /$cover
 /coverage.out
 /coverage.html
+/.playwright-cli/
 *.test
 *.prof
 *.tar
