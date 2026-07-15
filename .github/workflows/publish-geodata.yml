@@ -51,6 +51,8 @@ jobs:
           docker volume create eew-geodata-ci >/dev/null
           docker run -d \
             --name eew-geodata-ci \
+            --memory 256m \
+            --pids-limit 128 \
             -e POSTGRES_DB=eew \
             -e POSTGRES_USER=eew \
             -e POSTGRES_PASSWORD="${password}" \
@@ -60,7 +62,14 @@ jobs:
             --health-timeout=5s \
             --health-retries=180 \
             --health-start-period=30s \
-            "${IMAGE}" >/dev/null
+            "${IMAGE}" \
+            postgres \
+            -c shared_buffers=64MB \
+            -c effective_cache_size=192MB \
+            -c work_mem=2MB \
+            -c maintenance_work_mem=32MB \
+            -c max_connections=30 \
+            >/dev/null
 
           for attempt in $(seq 1 180); do
             status="$(docker inspect --format '{{.State.Health.Status}}' eew-geodata-ci)"
