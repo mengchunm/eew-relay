@@ -23,6 +23,16 @@ jobs:
             exit 1
           fi
 
+      - name: Verify maintainer documentation
+        shell: bash
+        run: |
+          test -s CONTRIBUTING.md
+          test -s docs/BRANCH_AND_RELEASE_WORKFLOW.md
+          test -s docs/OPEN_SOURCE_DEPLOYMENT.md
+          test -s docs/CHANGE_CHECKLIST.md
+          grep -Fq 'docs/OPEN_SOURCE_DEPLOYMENT.md' README.md
+          grep -Fq 'docs/BRANCH_AND_RELEASE_WORKFLOW.md' README.md
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

@@ -6,6 +6,15 @@
 
 本仓库是可独立部署的开源版本。所有通过订阅接口成功提交的用户都会保存为正式订阅；首次订阅仍会发送一条测试通知，用于验证 Bark 推送链路。
 
+## 文档导航
+
+- [开源版本部署指南](docs/OPEN_SOURCE_DEPLOYMENT.md)
+- [分支与发布工作流](docs/BRANCH_AND_RELEASE_WORKFLOW.md)
+- [变更检查清单](docs/CHANGE_CHECKLIST.md)
+- [参与贡献](CONTRIBUTING.md)
+
+凡是修改用户行为、API、配置、依赖或部署流程，都必须在同一变更中维护对应文档和测试。
+
 ## 特性
 
 - 公开订阅页面：`/`
