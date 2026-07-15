@@ -1310,7 +1310,8 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`勿扰静音不响铃`,
 		`强行响铃`,
 		`填写 Bark Key、监测位置和提醒规则即可订阅正式地震预警`,
-		`class="actions" id="subscription-actions" hidden`,
+		`class="actions" id="subscription-actions">`,
+		`id="page-nav" aria-label="页面导航">`,
 		`id="submit" type="submit">订阅 / 更新</button>`,
 		`typeof json.data.persisted !== "boolean"`,
 		`订阅已生效，测试通知已发送。`,
@@ -1338,6 +1339,10 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`"/api/subscription/" + encodeURIComponent(key)`,
 		`"/api/unsubscribe/" + encodeURIComponent(key)`,
 		`bindTooltip(item.name`,
+		`subscriptionActions.hidden = true`,
+		`subscriptionActions.hidden = !existingSubscription`,
+		`pageNav.hidden = true`,
+		`pageNav.hidden = !existingSubscription`,
 		`unpkg.com`,
 		`至（不含）`,
 		`id="stats"`,
@@ -1440,6 +1445,17 @@ func TestHTTPServesVendoredLeafletWithCompatibleCSP(t *testing.T) {
 	csp := rec.Header().Get("Content-Security-Policy")
 	if strings.Contains(csp, "unpkg.com") || strings.Contains(csp, "autonavi.com") || strings.Contains(csp, "cartocdn.com") || !strings.Contains(csp, "img-src 'self' data:") {
 		t.Fatalf("unexpected map CSP: %q", csp)
+	}
+	if strings.Contains(csp, "upgrade-insecure-requests") || rec.Header().Get("Strict-Transport-Security") != "" {
+		t.Fatalf("plain HTTP response must not force relative assets onto HTTPS: csp=%q hsts=%q", csp, rec.Header().Get("Strict-Transport-Security"))
+	}
+
+	httpsReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	httpsReq.Header.Set("X-Forwarded-Proto", "https")
+	httpsRec := httptest.NewRecorder()
+	handler.ServeHTTP(httpsRec, httpsReq)
+	if !strings.Contains(httpsRec.Header().Get("Content-Security-Policy"), "upgrade-insecure-requests") || httpsRec.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatalf("HTTPS response is missing transport security headers: csp=%q hsts=%q", httpsRec.Header().Get("Content-Security-Policy"), httpsRec.Header().Get("Strict-Transport-Security"))
 	}
 }
 

@@ -705,7 +705,7 @@
 <body>
   <main>
     <header>
-      <nav class="top-nav subscribe-active" id="page-nav" aria-label="页面导航" hidden>
+      <nav class="top-nav subscribe-active" id="page-nav" aria-label="页面导航">
         <a class="active" href="/">订阅页</a>
         <a href="/manage">测试页</a>
       </nav>
@@ -774,7 +774,7 @@
 
         <div id="status" class="status" role="alert"></div>
 
-        <div class="actions" id="subscription-actions" hidden>
+        <div class="actions" id="subscription-actions">
           <button class="primary" id="submit" type="submit">订阅 / 更新</button>
           <button id="unsubscribe" type="button" hidden>取消订阅</button>
         </div>
@@ -1651,8 +1651,6 @@
       submit.textContent = "订阅 / 更新";
       submit.disabled = false;
       unsubscribe.hidden = true;
-      subscriptionActions.hidden = true;
-      pageNav.hidden = true;
       if (barkInput.value.includes("://")) normalizeBarkInput(true).then(() => verifyBarkKey(true));
     });
     barkInput.addEventListener("paste", () => setTimeout(() => normalizeBarkInput(true).then(() => verifyBarkKey(true)), 0));
@@ -1721,8 +1719,6 @@
         existingSubscription = json.data.persisted;
         submit.textContent = "订阅 / 更新";
         unsubscribe.hidden = !existingSubscription;
-        subscriptionActions.hidden = !existingSubscription;
-        pageNav.hidden = !existingSubscription;
         showSubscriptionSuccess();
       } catch (err) {
         show(err.message || "网络请求失败。", "error");
@@ -1745,8 +1741,6 @@
         existingSubscription = false;
         submit.textContent = "订阅 / 更新";
         unsubscribe.hidden = true;
-        subscriptionActions.hidden = true;
-        pageNav.hidden = true;
         show("已取消订阅。", "success");
       } catch (err) {
         show(err.message || "网络请求失败。", "error");
