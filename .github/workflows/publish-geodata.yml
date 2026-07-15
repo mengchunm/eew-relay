@@ -89,7 +89,7 @@ jobs:
           # Fresh initialization is proven under the Compose 256 MB limit above.
           # The exhaustive ST_IsValid audit is a release-only full-table scan and
           # receives extra memory so it does not distort normal runtime sizing.
-          docker update --memory 1g eew-geodata-ci >/dev/null
+          docker update --memory 1g --memory-swap 2g eew-geodata-ci >/dev/null
           docker exec -i eew-geodata-ci psql -v ON_ERROR_STOP=1 -U eew -d eew <<'SQL'
           DO $validate$
           BEGIN
