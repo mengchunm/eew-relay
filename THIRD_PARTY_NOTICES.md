@@ -4,8 +4,9 @@
 
 The vendored files under `public/leaflet/` are from [Leaflet](https://leafletjs.com/) and are distributed under the BSD 2-Clause License.
 
-Copyright (c) 2010-2023, Volodymyr Agafonkin  
-Copyright (c) 2010-2011, CloudMade  
+Copyright (c) 2010-2023, Volodymyr Agafonkin
+
+Copyright (c) 2010-2011, CloudMade
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
