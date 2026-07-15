@@ -1417,6 +1417,7 @@ func TestManageHistoryAllowsRuleResponseForUnmatchedEvents(t *testing.T) {
 		`测试页需要已有正式订阅`,
 		`location.href="/manage#key="+encodeURIComponent(key)`,
 		`protectedContent.forEach(function(node){node.hidden=false})`,
+		`<link rel="icon" href="/eew-favicon.svg" type="image/svg+xml">`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("manage page is missing unmatched-history response UI %q", required)

@@ -3227,6 +3227,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>地震预警测试页</title>
+  <link rel="icon" href="/eew-favicon.svg" type="image/svg+xml">
   <link rel="prefetch" href="/">
   <style>
     :root{color-scheme:light dark;--bg:#f6f7f9;--panel:#fff;--text:#171717;--muted:#667085;--line:#d8dee7;--red:#d92d20;--blue:#175cd3;--soft:#f2f4f7;--ok:#087443;--warn:#b54708}
