@@ -1317,6 +1317,9 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`订阅已生效，测试通知已发送。`,
 		`submit.textContent = "订阅 / 更新"`,
 		`window.addEventListener("pageshow", () => { submit.disabled = false; });`,
+		`当前页面使用 HTTP，浏览器无法获取设备定位。请使用上方搜索框搜索地址并添加定位，或改用 HTTPS 地址。`,
+		`定位失败或未获得定位权限。请使用上方搜索框搜索地址并添加定位。`,
+		`window.isSecureContext`,
 		`function temporaryTestPayload(key)`,
 		`body: JSON.stringify(payload)`,
 		`bark_id: key`,
@@ -1410,6 +1413,10 @@ func TestManageHistoryAllowsRuleResponseForUnmatchedEvents(t *testing.T) {
 		`background:#fff`,
 		`id="status-close"`,
 		`window.setTimeout(hideStatus`,
+		`id="access-panel" hidden`,
+		`测试页需要已有正式订阅`,
+		`location.href="/manage#key="+encodeURIComponent(key)`,
+		`protectedContent.forEach(function(node){node.hidden=false})`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("manage page is missing unmatched-history response UI %q", required)
@@ -1418,8 +1425,8 @@ func TestManageHistoryAllowsRuleResponseForUnmatchedEvents(t *testing.T) {
 	if strings.Contains(body, `const disabled=notifyLevel`) {
 		t.Fatal("manage page must allow unmatched historical events to request a rule response")
 	}
-	if strings.Contains(body, `queryKey||localStorage.getItem("eew_bark_id")`) || !strings.Contains(body, `body.authorized{visibility:visible}`) || !strings.Contains(body, `location.replace("/#key="+encodeURIComponent(barkID))`) {
-		t.Fatal("manage page must stay hidden and redirect unless the explicit Bark Key has a stored subscription")
+	if strings.Contains(body, `queryKey||localStorage.getItem("eew_bark_id")`) || strings.Contains(body, `body.authorized{visibility:visible}`) || strings.Contains(body, `location.replace(`) {
+		t.Fatal("manage page must open with an explicit Bark Key prompt instead of hiding or redirecting")
 	}
 }
 

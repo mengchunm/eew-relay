@@ -3231,10 +3231,10 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   <style>
     :root{color-scheme:light dark;--bg:#f6f7f9;--panel:#fff;--text:#171717;--muted:#667085;--line:#d8dee7;--red:#d92d20;--blue:#175cd3;--soft:#f2f4f7;--ok:#087443;--warn:#b54708}
     @media(prefers-color-scheme:dark){:root{--bg:#101214;--panel:#1c1f23;--text:#f5f7fa;--muted:#a5acb5;--line:#3a4048;--soft:#252a31}}
-    *{box-sizing:border-box}@view-transition{navigation:auto}@keyframes page-out{to{opacity:0;transform:translateY(3px)}}@keyframes page-in{from{opacity:0;transform:translateY(-3px)}}::view-transition-old(root){animation:page-out 120ms ease both}::view-transition-new(root){animation:page-in 180ms ease both}::view-transition-old(page-switcher),::view-transition-new(page-switcher){animation-duration:220ms}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;visibility:hidden}body.authorized{visibility:visible}
+    *{box-sizing:border-box}@view-transition{navigation:auto}@keyframes page-out{to{opacity:0;transform:translateY(3px)}}@keyframes page-in{from{opacity:0;transform:translateY(-3px)}}::view-transition-old(root){animation:page-out 120ms ease both}::view-transition-new(root){animation:page-in 180ms ease both}::view-transition-old(page-switcher),::view-transition-new(page-switcher){animation-duration:220ms}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     main{width:min(760px,calc(100% - 28px));margin:0 auto;padding:24px 0 calc(28px + env(safe-area-inset-bottom))}
     .top-nav{position:relative;isolation:isolate;display:grid;grid-template-columns:1fr 1fr;width:max-content;padding:3px;gap:0;align-items:center;margin-bottom:18px;border:1px solid var(--line);border-radius:9px;background:var(--soft);view-transition-name:page-switcher}.top-nav:before{content:"";position:absolute;z-index:-1;top:3px;bottom:3px;left:3px;width:calc((100% - 6px)/2);border-radius:6px;background:var(--red);box-shadow:0 1px 3px rgba(16,24,40,.14);transform:translateX(0);transition:transform 180ms ease}.top-nav.manage-active:before{transform:translateX(100%)}.top-nav a{min-width:58px;height:32px;border-radius:6px;border:0;background:transparent;color:var(--text);text-decoration:none;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;padding:0 11px}.top-nav a.active{color:#fff}.top-nav a:focus-visible{outline:2px solid var(--red);outline-offset:3px}@media(prefers-reduced-motion:reduce){.top-nav:before{transition:none}::view-transition-old(root),::view-transition-new(root){animation:none}}
-    h1{font-size:28px;margin:0 0 8px}h2{font-size:18px;margin:0 0 8px}.muted{color:var(--muted);line-height:1.55}.shutdown-notice{margin:12px 0 14px;padding:13px 15px;border:1px solid color-mix(in srgb,var(--red) 34%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--red) 8%,var(--panel));color:var(--text);font-size:14px;line-height:1.6}.shutdown-notice strong{color:var(--red)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
+    h1{font-size:28px;margin:0 0 8px}h2{font-size:18px;margin:0 0 8px}.muted{color:var(--muted);line-height:1.55}.shutdown-notice{margin:12px 0 14px;padding:13px 15px;border:1px solid color-mix(in srgb,var(--red) 34%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--red) 8%,var(--panel));color:var(--text);font-size:14px;line-height:1.6}.shutdown-notice strong{color:var(--red)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}.access-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin-top:14px}.access-form input{height:50px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 12px;font:inherit}.access-form button{padding:0 18px}.access-message{min-height:22px;margin-top:10px;color:var(--red);line-height:1.5}
     dl{display:grid;grid-template-columns:104px 1fr;gap:10px 12px;margin:0}dt{color:var(--muted)}dd{margin:0;font-weight:750;word-break:break-word}.key-row{display:flex;align-items:center;gap:4px;min-width:0}.key-value{display:inline-flex;align-items:center;min-height:32px;max-width:calc(100% - 76px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}.key-action{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--text);padding:0;flex:0 0 auto}.key-action svg{width:17px;height:17px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.key-action.copied{color:var(--ok);border-color:rgba(8,116,67,.45);background:rgba(8,116,67,.1)}.key-action:active{transform:translateY(1px)}#pos{display:grid;gap:8px;font-weight:700}.location-row{display:grid;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--soft)}.location-coords{font-weight:900;color:var(--text);font-variant-numeric:tabular-nums}.location-address{color:var(--muted);font-size:13px;line-height:1.45;font-weight:650}
     .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.actions.single{grid-template-columns:1fr}button,a.btn{height:50px;border-radius:8px;border:0;display:flex;align-items:center;justify-content:center;text-decoration:none;font-weight:900;font-size:15px;font-family:inherit}
     .notify-card{width:100%;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel);margin-top:14px}.threshold-row{display:grid;grid-template-columns:1fr 150px;gap:12px;align-items:center;padding:12px;background:var(--soft);border-bottom:1px solid var(--line)}.setting-title{font-weight:900;font-size:16px;line-height:1.25}.setting-note{margin-top:4px;color:var(--muted);font-size:14px;line-height:1.4}.rule-rows{display:grid;width:100%}.rule-row{display:grid;grid-template-columns:var(--range-column-width,max-content) minmax(0,1fr) max-content;gap:10px;align-items:center;width:100%;padding:12px;border-top:1px solid var(--line)}.rule-row:first-child{border-top:0}.range-fields{display:grid;grid-template-columns:auto max-content;gap:7px;align-items:center;justify-content:start;width:100%}.range-fields span{color:var(--muted);font-size:14px;font-weight:900;white-space:nowrap}.range-value{font-weight:900;color:var(--text);font-variant-numeric:tabular-nums}.band-choice{width:100%;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:flex;align-items:center}.band-text{display:grid;gap:3px;min-width:0}.band-main{font-weight:900;font-size:15px;line-height:1.2}.band-sub{font-size:13px;font-weight:800;line-height:1.3;opacity:.78;white-space:normal}.level-passive{color:#344054;background:#eef2f6;border-color:#d5dbe5}.level-active{color:#175cd3;background:#eff6ff;border-color:#bfd7ff}.level-critical{color:#b42318;background:#fff1f0;border-color:#ffc9c4}.level-test{height:44px;min-width:64px;border-radius:8px;padding:0 10px;font-size:14px;background:var(--panel);border:1px solid var(--line);color:var(--text);font-weight:900}
@@ -3242,15 +3242,24 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     .primary{background:var(--red);color:#fff}.secondary{background:var(--soft);color:var(--text);border:1px solid var(--line)}.status{display:none;position:fixed;right:16px;bottom:16px;z-index:1000;width:min(calc(100% - 32px),560px);align-items:flex-start;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 12px 32px rgba(16,24,40,.18);line-height:1.5}.status.show{display:flex}.status-text{flex:1}.status-close{flex:0 0 auto;width:28px;height:28px;margin:-2px -4px -2px 0;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);font-size:22px;line-height:1;cursor:pointer}.status-close:hover{background:var(--soft);color:var(--text)}.ok{color:var(--ok)}.err{color:var(--red)}
     .history-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.history-head .muted{font-size:14px}.history-tools{display:grid;grid-template-columns:120px 120px auto;gap:8px;margin-bottom:12px}.history-tools select{height:42px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px;font:inherit}.history-tools button{height:42px;padding:0 14px}.history-list,.major-list{display:grid;gap:10px}.history-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);line-height:1.5}.pager{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;margin-top:12px}.pager button{height:40px;padding:0 14px}.pager button:disabled{opacity:.45}.page-info{color:var(--muted);font-size:13px}
     .history-item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--soft)}.history-title{font-weight:900;margin-bottom:5px}.history-meta{display:flex;flex-wrap:wrap;gap:6px 10px;color:var(--muted);font-size:13px;line-height:1.4}.badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:rgba(23,92,211,.12);color:var(--blue);font-weight:900;font-size:12px;text-transform:uppercase}.estimate{color:var(--red);font-weight:900}.history-test{min-width:108px;height:42px;padding:0 12px}.history-note{margin-top:10px;color:var(--warn);font-size:13px;line-height:1.5}
-    @media(max-width:560px){input,select,textarea{font-size:16px}.actions{grid-template-columns:1fr 1fr}.actions .btn{grid-column:1/-1}dl{grid-template-columns:88px 1fr}.threshold-row{grid-template-columns:1fr}.rule-row{grid-template-columns:minmax(0,1fr) 64px;gap:8px;padding:12px 10px;align-items:center;justify-content:stretch}.range-fields{grid-column:1/-1;grid-row:1;grid-template-columns:auto 1fr;gap:8px;justify-content:stretch;min-height:44px;align-items:center}.band-choice{grid-column:1/2;grid-row:2;min-height:44px;padding:8px 10px}.level-test{grid-column:2/3;grid-row:2;width:100%;height:44px;min-width:0;padding:0 6px}.band-main{font-size:14px}.band-sub{font-size:12px}.history-head{display:block}.history-tools{grid-template-columns:1fr 1fr}.history-tools button{grid-column:1/-1}.history-item{grid-template-columns:1fr}.history-test{width:100%}.pager{grid-template-columns:1fr 1fr}.page-info{grid-column:1/-1}}
+    @media(max-width:560px){input,select,textarea{font-size:16px}.access-form{grid-template-columns:1fr}.access-form button{width:100%}.actions{grid-template-columns:1fr 1fr}.actions .btn{grid-column:1/-1}dl{grid-template-columns:88px 1fr}.threshold-row{grid-template-columns:1fr}.rule-row{grid-template-columns:minmax(0,1fr) 64px;gap:8px;padding:12px 10px;align-items:center;justify-content:stretch}.range-fields{grid-column:1/-1;grid-row:1;grid-template-columns:auto 1fr;gap:8px;justify-content:stretch;min-height:44px;align-items:center}.band-choice{grid-column:1/2;grid-row:2;min-height:44px;padding:8px 10px}.level-test{grid-column:2/3;grid-row:2;width:100%;height:44px;min-width:0;padding:0 6px}.band-main{font-size:14px}.band-sub{font-size:12px}.history-head{display:block}.history-tools{grid-template-columns:1fr 1fr}.history-tools button{grid-column:1/-1}.history-item{grid-template-columns:1fr}.history-test{width:100%}.pager{grid-template-columns:1fr 1fr}.page-info{grid-column:1/-1}}
   </style>
 </head>
 <body>
 <main>
   <nav class="top-nav manage-active" aria-label="页面导航"><a id="subscribe-nav" href="/">订阅页</a><a class="active" id="test-nav" href="/manage">测试页</a></nav>
   <h1>测试页</h1>
-  <div class="muted">当前页面展示这个 Bark Key 在订阅页保存的配置。测试推送只会发送到这个 Key，不影响其他用户。</div>
-  <section class="panel">
+  <div class="muted">测试页可以正常打开；输入已有正式订阅的 Bark Key 后，将展示保存的配置和测试功能。</div>
+  <section class="panel" id="access-panel" hidden>
+    <h2>输入 Bark Key</h2>
+    <div class="muted">测试页需要已有正式订阅。请填写 Bark Key；如果还未订阅，请先返回订阅页完成正式订阅。</div>
+    <form class="access-form" id="access-form">
+      <input id="access-key" autocomplete="off" required maxlength="256" placeholder="填写 Bark Key 或完整 Bark URL">
+      <button class="primary" type="submit">打开测试页</button>
+    </form>
+    <div class="access-message" id="access-message" role="alert"></div>
+  </section>
+  <section class="panel protected-content" hidden>
     <dl>
       <dt>Bark Key</dt><dd><div class="key-row"><span class="key-value" id="bark"></span><button class="key-action" id="toggle-key" type="button" title="显示 Bark Key" aria-label="显示 Bark Key"></button><button class="key-action" id="copy-key" type="button" title="复制 Bark Key" aria-label="复制 Bark Key"></button></div></dd>
       <dt>Bark 服务器</dt><dd id="bark-server">加载中</dd>
@@ -3273,7 +3282,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     </div>
     <div class="status" id="status" role="status" aria-live="polite"><span class="status-text" id="status-text"></span><button class="status-close" id="status-close" type="button" aria-label="关闭提示">×</button></div>
   </section>
-  <section class="panel">
+  <section class="panel protected-content" hidden>
     <div class="history-head">
       <div>
         <h2>历史真实数据测试</h2>
@@ -3306,7 +3315,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     </div>
     <div class="history-note">历史数据用于测试复现，不代表实时预警正在发生；通知内容会保留所选历史记录的真实发震时间。</div>
   </section>
-  <section class="panel">
+  <section class="panel protected-content" hidden>
     <div class="history-head">
       <div>
         <h2>历史地震复现</h2>
@@ -3319,7 +3328,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   </section>
 </main>
 <script>
-  const api=location.origin, statusEl=document.getElementById("status"), statusText=document.getElementById("status-text"), statusClose=document.getElementById("status-close"), historyList=document.getElementById("history-list"), majorList=document.getElementById("major-list"), historySource=document.getElementById("history-source"), historyMinMag=document.getElementById("history-min-mag"), historyRefresh=document.getElementById("history-refresh"), historyPrev=document.getElementById("history-prev"), historyNext=document.getElementById("history-next"), historyPageInfo=document.getElementById("history-page-info"), manageBands=document.getElementById("manage-bands"), barkEl=document.getElementById("bark"), toggleKey=document.getElementById("toggle-key"), copyKey=document.getElementById("copy-key");
+  const api=location.origin, statusEl=document.getElementById("status"), statusText=document.getElementById("status-text"), statusClose=document.getElementById("status-close"), historyList=document.getElementById("history-list"), majorList=document.getElementById("major-list"), historySource=document.getElementById("history-source"), historyMinMag=document.getElementById("history-min-mag"), historyRefresh=document.getElementById("history-refresh"), historyPrev=document.getElementById("history-prev"), historyNext=document.getElementById("history-next"), historyPageInfo=document.getElementById("history-page-info"), manageBands=document.getElementById("manage-bands"), barkEl=document.getElementById("bark"), toggleKey=document.getElementById("toggle-key"), copyKey=document.getElementById("copy-key"), accessPanel=document.getElementById("access-panel"), accessForm=document.getElementById("access-form"), accessKey=document.getElementById("access-key"), accessMessage=document.getElementById("access-message"), protectedContent=Array.from(document.querySelectorAll(".protected-content"));
   function extractKey(value){value=String(value||"").trim();try{if(value.includes("://")){const u=new URL(value);const parts=u.pathname.split("/").filter(Boolean);if(parts.length)value=parts[0]}}catch(e){}return value.trim().replace(/^["']|["']$/g,"")}
   const hashParams=new URLSearchParams(location.hash.replace(/^#/,"")), queryParams=new URLSearchParams(location.search);
   const queryKey=extractKey(queryParams.get("bark_id")||queryParams.get("bark")||queryParams.get("key")||"");
@@ -3360,15 +3369,18 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   copyKey.innerHTML=iconCopy;
   toggleKey.addEventListener("click",function(){keyVisible=!keyVisible;renderBarkKey()});
   copyKey.addEventListener("click",async function(){const ok=await copyText(barkID);if(ok){copyKey.classList.add("copied");copyKey.innerHTML=iconCheck;show("Bark Key 已复制。","ok");setTimeout(function(){copyKey.classList.remove("copied");copyKey.innerHTML=iconCopy},1200)}else{show("复制失败，请先点眼睛显示后手动复制。","err")}});
+  function showAccess(message){accessPanel.hidden=false;accessKey.value=barkID||"";accessMessage.textContent=message||"";protectedContent.forEach(function(node){node.hidden=true})}
+  accessForm.addEventListener("submit",function(event){event.preventDefault();const key=extractKey(accessKey.value);if(!key){accessMessage.textContent="请填写 Bark Key。";return}location.href="/manage#key="+encodeURIComponent(key)});
   async function load(){
-    if(!barkID){location.replace("/");return}
+    if(!barkID){showAccess("");return}
     try{
       const res=await authFetch("/api/subscription");
       const json=await res.json();
-      if(!res.ok||!json.success){location.replace("/#key="+encodeURIComponent(barkID));return}
+      if(!res.ok||!json.success){showAccess(json.message||"未找到这个 Bark Key 的正式订阅。");return}
       const s=json.data;
       currentSub=s;
-      document.body.classList.add("authorized");
+      accessPanel.hidden=true;
+      protectedContent.forEach(function(node){node.hidden=false});
       document.getElementById("bark-server").textContent=s.bark_server||"未配置";
       const locs=Array.isArray(s.locations)&&s.locations.length?s.locations:[{name:s.location_name||"",latitude:s.latitude,longitude:s.longitude}];
       document.getElementById("pos").innerHTML=renderLocations(locs);
@@ -3376,7 +3388,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
       renderBands();
       show("已加载订阅页保存的配置。","ok");
       await Promise.all([loadSimulations(),loadHistory(),loadMajorHistory()]);
-    }catch(e){location.replace("/#key="+encodeURIComponent(barkID))}
+    }catch(e){showAccess("测试页暂时无法读取订阅，请稍后重试。")}
   }
   async function loadSimulations(){
     try{

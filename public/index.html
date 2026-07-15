@@ -1607,8 +1607,19 @@
       }
       focusLocation(index);
     });
+    function geolocationFailureMessage() {
+      if (!window.isSecureContext) {
+        return "当前页面使用 HTTP，浏览器无法获取设备定位。请使用上方搜索框搜索地址并添加定位，或改用 HTTPS 地址。";
+      }
+      return "定位失败或未获得定位权限。请使用上方搜索框搜索地址并添加定位。";
+    }
+
     locate.addEventListener("click", () => {
-      if (!navigator.geolocation) return show("当前浏览器不支持定位。", "error");
+      if (!navigator.geolocation) {
+        const message = geolocationFailureMessage();
+        showLocationNotice(message, "error");
+        return show(message, "error");
+      }
       if (selectedLocations.length >= 3) {
         showLocationNotice("已添加 3 个监测地点，不能继续添加。", "error");
         return;
@@ -1637,7 +1648,9 @@
           locate.disabled = false;
         },
         () => {
-          show("定位失败，请手动点击地图或输入经纬度。", "error");
+          const message = geolocationFailureMessage();
+          showLocationNotice(message, "error");
+          show(message, "error");
           locate.disabled = false;
         },
         { enableHighAccuracy: true, timeout: 9000 }
