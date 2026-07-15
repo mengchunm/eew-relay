@@ -28,6 +28,12 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
 func TestParseCencEvent(t *testing.T) {
 	payload := []byte(`{
 		"type": "cenc_eew",
@@ -987,6 +993,19 @@ func TestNormalizeBarkIDInput(t *testing.T) {
 	}
 }
 
+func TestNormalizeBarkServerPrefersConfiguredDefaultAndRecognizesOptionalSelfHosted(t *testing.T) {
+	cfg := Config{Bark: BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test"}}
+	if got := normalizeBarkServer("", cfg); got != "https://api.day.app" {
+		t.Fatalf("unexpected default Bark server: %q", got)
+	}
+	if !isOfficialBarkServer(normalizeBarkServer("https://api.day.app/", cfg)) {
+		t.Fatal("official Bark server was not recognized")
+	}
+	if !isSelfHostedBarkServer("https://bark.example.test", cfg) {
+		t.Fatal("configured self-hosted Bark server was not recognized")
+	}
+}
+
 func TestBarkIDFromRequestPrefersBearerAndSupportsLegacyPath(t *testing.T) {
 	t.Run("bearer", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/subscription/legacyKey", nil)
@@ -1328,6 +1347,10 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`manageNav.addEventListener("click"`,
 		`id="unsubscribe" type="button" hidden`,
 		`const defaultBarkServer = __EEW_DEFAULT_BARK_SERVER_JSON__;`,
+		`const selfHostedBarkServer = __EEW_SELF_HOSTED_BARK_SERVER_JSON__;`,
+		`let selectedBarkServer = defaultBarkServer;`,
+		`/api/bark-key?server=`,
+		`bark_server: selectedBarkServer || defaultBarkServer`,
 		`OpenStreetMap`,
 		`CARTO`,
 	} {
@@ -1373,7 +1396,7 @@ func TestRootInjectsConfiguredBarkServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Bark: BarkConfig{Server: "https://bark.example.test", SelfHostedServer: "https://bark.example.test"}}
+	cfg := Config{Bark: BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test"}}
 	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), NewNotifier(cfg.Bark), &RuntimeHealth{})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -1382,7 +1405,9 @@ func TestRootInjectsConfiguredBarkServer(t *testing.T) {
 		t.Fatalf("root status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "__EEW_DEFAULT_BARK_SERVER_JSON__") || !strings.Contains(body, `const defaultBarkServer = "https://bark.example.test";`) {
+	if strings.Contains(body, "__EEW_DEFAULT_BARK_SERVER_JSON__") || strings.Contains(body, "__EEW_SELF_HOSTED_BARK_SERVER_JSON__") ||
+		!strings.Contains(body, `const defaultBarkServer = "https://api.day.app";`) ||
+		!strings.Contains(body, `const selfHostedBarkServer = "https://bark.example.test";`) {
 		t.Fatalf("configured Bark server was not injected safely: %q", body)
 	}
 }
@@ -1559,6 +1584,65 @@ func TestHTTPSubscribeRejectsUnapprovedBarkServer(t *testing.T) {
 	}
 	if store.Count() != 0 {
 		t.Fatal("unapproved Bark server was persisted")
+	}
+}
+
+func TestHTTPSubscribeCreatesOfficialSubscriptionAfterTestPush(t *testing.T) {
+	var pushes atomic.Int32
+	notifier := NewNotifier(BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test", Group: "test"}, AlertConfig{
+		SWaveKMS:          3.5,
+		PWaveKMS:          6,
+		SendRetryAttempts: 1,
+		SendRetryDelayMS:  1,
+	})
+	notifier.client = &http.Client{
+		Timeout: time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Scheme != "https" || req.URL.Host != "api.day.app" || req.URL.Path != "/officialTestKey" {
+				t.Fatalf("unexpected official Bark request: %s", req.URL.String())
+			}
+			pushes.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":200,"message":"success"}`)),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Bark:  BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test", Group: "test"},
+		Alert: AlertConfig{SWaveKMS: 3.5, PWaveKMS: 6, SendRetryAttempts: 1, SendRetryDelayMS: 1},
+	}
+	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), notifier, &RuntimeHealth{})
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/api/bark-key?server=https%3A%2F%2Fapi.day.app", nil)
+	verifyReq.Header.Set("Authorization", "Bearer officialTestKey")
+	verifyRec := httptest.NewRecorder()
+	handler.ServeHTTP(verifyRec, verifyReq)
+	if verifyRec.Code != http.StatusOK || !strings.Contains(verifyRec.Body.String(), `"verification":"test_push"`) {
+		t.Fatalf("official Bark preflight status=%d body=%s", verifyRec.Code, verifyRec.Body.String())
+	}
+
+	body := `{"bark_id":"officialTestKey","bark_server":"https://api.day.app","latitude":30.5,"longitude":104.1,"locations":[{"name":"测试地点","latitude":30.5,"longitude":104.1}],"notify_bands":[{"min":2,"max":99,"level":"active","label":"勿扰静音不响铃"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/subscribe", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("official subscription status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if pushes.Load() != 1 {
+		t.Fatalf("expected one official Bark test push, got %d", pushes.Load())
+	}
+	created, ok := store.Get("officialTestKey")
+	if !ok || created.BarkServer != "https://api.day.app" {
+		t.Fatalf("official subscription was not stored correctly: %#v", created)
 	}
 }
 
@@ -2437,5 +2521,23 @@ func TestLoadConfigUsesConfiguredBarkServerWithoutProductionFallback(t *testing.
 	}
 	if cfg.Bark.Server != "https://bark.example.test" || cfg.Bark.SelfHostedServer != "https://bark.example.test" {
 		t.Fatalf("unexpected Bark defaults: %#v", cfg.Bark)
+	}
+}
+
+func TestLoadConfigKeepsOfficialOnlyDeploymentWithoutSelfHostedFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("bark:\n  server: https://api.day.app/\nserver:\n  port: 30010\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bark.Server != "https://api.day.app" || cfg.Bark.SelfHostedServer != "" {
+		t.Fatalf("official deployment unexpectedly enabled self-hosted validation: %#v", cfg.Bark)
+	}
+	if isSelfHostedBarkServer(cfg.Bark.Server, cfg) {
+		t.Fatal("official api.day.app must not be classified as self-hosted")
 	}
 }

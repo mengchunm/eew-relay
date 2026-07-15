@@ -47,10 +47,10 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/app/data
-      - ${BARK_DB_PATH:-./bark.db}:/app/bark.db:ro
     environment:
       TZ: Asia/Shanghai
       EEW_POSTGRES_DSN: "postgres://eew:${POSTGRES_PASSWORD}@postgres:5432/eew?sslmode=disable"
+      EEW_BARK_DEVICE_DSN: ${EEW_BARK_DEVICE_DSN:-}
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777,noexec,nosuid,nodev

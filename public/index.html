@@ -720,7 +720,7 @@
         <div class="field">
           <label for="bark-id">Bark Key</label>
           <input id="bark-id" name="bark_id" autocomplete="off" required maxlength="256" placeholder="例如：vRvm6tubpnHJYsX9fE2EYQ">
-          <small>支持填写完整 Bark URL，也支持只填写 Key。</small>
+          <small>只填写 Key 时使用部署者的默认服务器；官方 Bark 可直接粘贴 https://api.day.app/你的Key。</small>
           <div id="key-notice" class="key-notice"></div>
         </div>
 
@@ -805,6 +805,8 @@
   <script>
     const api = location.origin;
     const defaultBarkServer = __EEW_DEFAULT_BARK_SERVER_JSON__;
+    const selfHostedBarkServer = __EEW_SELF_HOSTED_BARK_SERVER_JSON__;
+    const officialBarkServer = "https://api.day.app";
     const form = document.querySelector("#form");
     const statusBox = document.querySelector("#status");
     const barkInput = document.querySelector("#bark-id");
@@ -839,6 +841,7 @@
     let keyVerifySeq = 0;
     let tutorialLoaded = false;
     let existingSubscription = false;
+    let selectedBarkServer = defaultBarkServer;
 
     const map = L.map("map", { zoomControl: true, attributionControl: true }).setView([35.0, 105.0], 4);
     L.tileLayer("/map-tiles/{z}/{x}/{y}{r}.png", { maxZoom: 18, crossOrigin: false, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>' }).addTo(map);
@@ -1103,16 +1106,27 @@
       return Number.isFinite(parsed) ? parsed : null;
     }
 
-    function parseBarkInput(value) {
+    function normalizeBarkServerURL(value) {
+      try { return new URL(value).origin.replace(/\/$/, ""); } catch { return ""; }
+    }
+
+    function isOfficialBarkServerURL(value) {
+      return normalizeBarkServerURL(value) === officialBarkServer;
+    }
+
+    function parseBarkInput(value, fallbackServer = defaultBarkServer) {
       let text = String(value || "").trim().replace(/^["']|["']$/g, "");
-      let server = defaultBarkServer;
+      let server = normalizeBarkServerURL(fallbackServer) || defaultBarkServer;
       if (!text) return { key: "", server };
       if (text.includes("://")) {
         try {
           const url = new URL(text);
-          const host = url.hostname.toLowerCase();
-          const configuredHost = (() => { try { return new URL(defaultBarkServer).hostname.toLowerCase(); } catch { return ""; } })();
-          if (host === "api.day.app" || host === configuredHost) {
+          const urlServer = normalizeBarkServerURL(url.origin);
+          const allowedServers = [officialBarkServer, defaultBarkServer, selfHostedBarkServer]
+            .map(normalizeBarkServerURL)
+            .filter(Boolean);
+          if (allowedServers.includes(urlServer)) {
+            server = urlServer;
             const first = url.pathname.split("/").filter(Boolean)[0] || "";
             text = decodeURIComponent(first);
           }
@@ -1246,7 +1260,7 @@
     async function normalizeBarkInput(visible = false) {
       if (barkNormalizeBusy) return extractBarkKey(barkInput.value);
       const raw = barkInput.value;
-      const parsed = parseBarkInput(barkInput.value);
+      const parsed = parseBarkInput(barkInput.value, selectedBarkServer);
       const key = parsed.key;
       const shouldConvert = key && key !== raw.trim() && raw.includes("://");
       if (shouldConvert && visible) {
@@ -1255,10 +1269,12 @@
         show("检测到 Bark 链接，正在提取 Key...", "info");
         await delay(650);
       }
+      if (key) selectedBarkServer = parsed.server || defaultBarkServer;
       if (key && key !== barkInput.value) barkInput.value = key;
       if (shouldConvert && visible) {
-        showKeyNotice("已从 Bark 链接提取并转换为 Key。", "success");
-        show("已从 Bark 链接提取并转换为 Key。", "success");
+        const serverLabel = isOfficialBarkServerURL(selectedBarkServer) ? "官方 Bark" : "自建 Bark";
+        showKeyNotice(`已从${serverLabel} 链接提取并转换为 Key。`, "success");
+        show(`已从${serverLabel} 链接提取并转换为 Key。`, "success");
         barkNormalizeBusy = false;
       }
       return key;
@@ -1270,11 +1286,11 @@
       if (!key) return;
       if (visible) showKeyNotice("正在验证 Bark Key...");
       try {
-        const res = await barkFetch("/api/bark-key", key);
+        const res = await barkFetch("/api/bark-key?server=" + encodeURIComponent(selectedBarkServer), key);
         const json = await res.json();
         if (seq !== keyVerifySeq) return;
         if (!res.ok || !json.success) throw new Error(json.message || "Bark Key 验证失败");
-        showKeyNotice("Bark Key 已验证。", "success");
+        showKeyNotice(json.message || "Bark Key 已验证。", "success");
         rememberBarkKey(key);
         await syncSubscriptionFromServer(key, visible);
       } catch (err) {
@@ -1289,6 +1305,7 @@
         const json = await res.json();
         if (!res.ok || !json.success || !json.data) return false;
         const sub = json.data;
+        selectedBarkServer = sub.bark_server || defaultBarkServer;
         const locations = normalizeLocationList(sub.locations || [{ name: sub.location_name || "", latitude: sub.latitude, longitude: sub.longitude }]);
         if (locations.length) {
           selectedLocations = locations;
@@ -1501,7 +1518,7 @@
       if (!locations.length) throw new Error("请至少添加一个监测地点。");
       const payload = {
         bark_id: key,
-        bark_server: defaultBarkServer,
+        bark_server: selectedBarkServer || defaultBarkServer,
         location_name: locations[0].name,
         latitude: Number(locations[0].latitude),
         longitude: Number(locations[0].longitude),
@@ -1661,6 +1678,7 @@
     barkInput.addEventListener("input", () => {
       keyVerifySeq++;
       existingSubscription = false;
+      if (!barkInput.value.includes("://")) selectedBarkServer = defaultBarkServer;
       submit.textContent = "订阅 / 更新";
       submit.disabled = false;
       unsubscribe.hidden = true;
@@ -1706,7 +1724,7 @@
       }
       const payload = {
         bark_id: barkID,
-        bark_server: defaultBarkServer,
+        bark_server: selectedBarkServer || defaultBarkServer,
         location_name: locations[0].name,
         latitude: Number(locations[0].latitude),
         longitude: Number(locations[0].longitude),
@@ -1724,6 +1742,7 @@
         if (!json.data || typeof json.data.persisted !== "boolean") throw new Error("服务器未返回订阅模式，已停止操作。");
         const responseKey = extractBarkKey(json.data && json.data.bark_id);
         const activeKey = responseKey === payload.bark_id ? responseKey : payload.bark_id;
+        selectedBarkServer = (json.data && json.data.bark_server) || payload.bark_server;
         barkInput.value = activeKey;
         rememberBarkKey(activeKey);
         selectedLocations = locations;
@@ -1767,6 +1786,7 @@
     if (barkInput.value) rememberBarkKey(extractBarkKey(barkInput.value));
     const saved = JSON.parse(localStorage.getItem("eew_position") || "null");
     if (saved) {
+      selectedBarkServer = saved.bark_server || selectedBarkServer;
       selectedLocations = normalizeLocationList(saved.locations || [{ name: saved.address || "", latitude: saved.lat, longitude: saved.lon }]);
       renderLocations();
       const first = selectedLocations[0] || { latitude: saved.lat, longitude: saved.lon };

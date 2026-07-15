@@ -47,10 +47,10 @@ go run . -config config.yaml -test-bark YOUR_BARK_KEY
 
 部署者必须先完成以下配置，示例域名不能直接用于生产：
 
-- 将 `bark.server` 和 `bark.self_hosted_server` 改成自己的 Bark Server HTTPS 地址。
+- 默认 `bark.server` 为官方 `https://api.day.app`，官方 Bark 部署不需要设备数据库。
 - 将 `server.public_url` 改成当前 EEW Relay 的 HTTPS 地址。
-- 准备该 Bark Server 的只读 `bark.db`，或通过 `EEW_BARK_DEVICE_DSN` 连接 Bark MySQL 设备库。
-- 仅当 Bark Server 与 EEW Relay 位于同一容器网络时才设置 `bark.self_hosted_internal_server`。
+- 如果同时支持自建 Bark，再配置 `bark.self_hosted_server`，并提供只读 `bark.db` 或 `EEW_BARK_DEVICE_DSN`。
+- 仅当自建 Bark 与 EEW Relay 位于同一容器网络时才设置 `bark.self_hosted_internal_server`。
 - 默认 Wolfx WebSocket 是真实地震信息源；测试 Bark 推送时不要替换或模拟预警计算逻辑。
 
 ```bash
@@ -62,20 +62,11 @@ mkdir -p data
 chmod 600 config.yaml .env
 chmod 700 data
 
-# bbolt 模式：必须指向现有 Bark Server 数据库文件
-export BARK_DB_PATH=/absolute/path/to/bark-data/bark.db
-test -f "${BARK_DB_PATH}"
-
 docker compose config --quiet
 docker compose build --pull
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:30010/health
-
-# 按生产版方法导入中国省、市、区县 PostGIS 边界；首次部署必须执行
-ENV_FILE="$PWD/.env" POSTGRES_CONTAINER=eew-postgres DOCKER_NETWORK=eew-relay \
-  sh ops/import-china-boundaries.sh
-docker compose restart eew-bark
 ```
 
 查看日志时不要在工单或聊天中粘贴包含凭据的历史日志：
@@ -84,9 +75,7 @@ docker compose restart eew-bark
 docker compose logs --tail=200 -f eew-bark
 ```
 
-Compose 已启用 PostgreSQL/PostGIS、容器健康检查、只读应用根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 保存 PostgreSQL、历史数据和审计数据；自建 Bark 的 `bark.db` 仍以只读方式挂载。
-
-若使用 MySQL 设备库，设置 `EEW_BARK_DEVICE_DSN` 后仍需为 Compose 的只读挂载提供一个普通占位文件，或按实际部署方式移除 `bark.db` 挂载。设备库只用于确认 Bark Key 已在当前自建 Bark Server 注册。
+Compose 已启用 PostgreSQL/PostGIS、容器健康检查、只读应用根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 保存 PostgreSQL、历史数据和审计数据。官方 Bark 模式不挂载 `bark.db`。
 
 `docker-compose.yml` 默认只绑定：
 
@@ -279,9 +268,27 @@ server:
 
 审计明细不保存完整 Bark Key，只保存掩码和 SHA-256 哈希，便于后续按用户提供的 Key 计算哈希后定位记录。
 
-## 自建 Bark Server
+## 官方与自建 Bark Server
 
-服务支持按订阅保存 Bark 服务器地址。新订阅使用部署者在 `bark.self_hosted_server` 中配置的自建 Bark Server；历史上使用官方 `https://api.day.app` 的订阅会继续保留原服务器并正常接收预警。用户需要先在 Bark App 里添加该自建服务器，再复制服务器生成的 Key 到订阅页。
+服务按订阅保存 Bark 服务器地址，同时支持官方 `https://api.day.app` 和部署者配置的自建 Bark。
+
+- 只填写 Bark Key 时使用 `bark.server`，开源示例默认使用官方 Bark。
+- 粘贴 `https://api.day.app/你的Key` 时明确使用官方 Bark。
+- 粘贴已配置自建服务器生成的完整 URL 时使用该自建服务器。
+- 新官方订阅无法读取官方设备库，因此先发送测试通知；只有官方接口确认发送成功后才保存正式订阅。
+- 自建 Bark Key 仍通过部署者自己的 bbolt/MySQL 设备库验证。
+
+官方 Bark 使用标准 POST 推送 URL，程序已有官方错误预算、失效 Key 熔断、有限重试和最高并发保护。Bark 官方项目的接口说明：<https://github.com/Finb/Bark>。
+
+启用自建 Bark 的 bbolt 验证时，先在 `config.yaml` 配置 `bark.self_hosted_server`，再使用附加 Compose 文件挂载数据库：
+
+```bash
+export BARK_DB_PATH=/absolute/path/to/bark-data/bark.db
+test -f "${BARK_DB_PATH}"
+docker compose -f docker-compose.yml -f docker-compose.self-hosted.yml up -d
+```
+
+若使用 MySQL 设备库，只需设置 `EEW_BARK_DEVICE_DSN`，不需要挂载 `bark.db`。
 
 下面是将 Bark Server 与本服务部署在同一环境的示例：
 

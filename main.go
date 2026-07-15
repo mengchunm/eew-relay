@@ -582,9 +582,6 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Bark.Server == "" {
 		cfg.Bark.Server = cfg.Bark.SelfHostedServer
 	}
-	if cfg.Bark.SelfHostedServer == "" {
-		cfg.Bark.SelfHostedServer = cfg.Bark.Server
-	}
 	for name, value := range map[string]string{
 		"bark.server":                      cfg.Bark.Server,
 		"bark.self_hosted_server":          cfg.Bark.SelfHostedServer,
@@ -1661,12 +1658,25 @@ func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *
 			writeJSON(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Bark Key 验证失败"})
 			return
 		}
+		barkServer := normalizeBarkServer(r.URL.Query().Get("server"), cfg)
+		if !isAllowedBarkServer(barkServer, cfg) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "仅支持 api.day.app 或本服务配置的自建 Bark 服务器"})
+			return
+		}
 		if sub, ok := store.Get(barkID); ok {
 			source := "self_hosted"
 			if isOfficialBarkServer(sub.BarkServer) {
 				source = "existing_official_subscription"
 			}
 			writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Bark Key 已验证", Data: map[string]any{"exists": true, "source": source}})
+			return
+		}
+		if isOfficialBarkServer(barkServer) {
+			writeJSON(w, http.StatusOK, APIResponse{
+				Success: true,
+				Message: "官方 Bark Key 格式有效，将在订阅时发送测试通知确认",
+				Data:    map[string]any{"exists": false, "source": "official", "verification": "test_push"},
+			})
 			return
 		}
 		exists, err := selfHostedBarkKeyExists(cfg, barkID)
@@ -1862,10 +1872,6 @@ func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *
 		existingSub, exists := store.Get(sub.BarkID)
 		if exists && isOfficialBarkServer(existingSub.BarkServer) && isSelfHostedBarkServer(sub.BarkServer, cfg) {
 			sub.BarkServer = existingSub.BarkServer
-		}
-		if isOfficialBarkServer(sub.BarkServer) && (!exists || !isOfficialBarkServer(existingSub.BarkServer)) {
-			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "新订阅仅支持自建 Bark 服务器，已有官方服务器订阅不受影响"})
-			return
 		}
 		if !exists && isSelfHostedBarkServer(sub.BarkServer, cfg) {
 			ok, err := selfHostedBarkKeyExists(cfg, sub.BarkID)
@@ -2094,7 +2100,13 @@ func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *
 			http.Error(w, "invalid Bark server configuration", http.StatusInternalServerError)
 			return
 		}
+		selfHostedBarkServerJSON, err := json.Marshal(strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/"))
+		if err != nil {
+			http.Error(w, "invalid self-hosted Bark server configuration", http.StatusInternalServerError)
+			return
+		}
 		data = bytes.ReplaceAll(data, []byte("__EEW_DEFAULT_BARK_SERVER_JSON__"), barkServerJSON)
+		data = bytes.ReplaceAll(data, []byte("__EEW_SELF_HOSTED_BARK_SERVER_JSON__"), selfHostedBarkServerJSON)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
@@ -2524,10 +2536,10 @@ func normalizeBarkInput(value, preferredServer string, cfg Config) (string, stri
 func normalizeBarkServer(server string, cfg Config) string {
 	server = strings.TrimRight(strings.TrimSpace(server), "/")
 	if server == "" {
-		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
+		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.Server), "/")
 	}
 	if server == "" {
-		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.Server), "/")
+		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
 	}
 	return server
 }
@@ -2549,6 +2561,12 @@ func isAllowedBarkServer(server string, cfg Config) bool {
 func isSelfHostedBarkServer(server string, cfg Config) bool {
 	server = normalizeBarkServer(server, cfg)
 	selfHosted := strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
+	if selfHosted == "" {
+		configuredDefault := strings.TrimRight(strings.TrimSpace(cfg.Bark.Server), "/")
+		if configuredDefault != "" && !isOfficialBarkServer(configuredDefault) {
+			selfHosted = configuredDefault
+		}
+	}
 	return selfHosted != "" && server == selfHosted
 }
 

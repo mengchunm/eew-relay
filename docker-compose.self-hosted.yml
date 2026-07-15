@@ -1,0 +1,4 @@
+services:
+  eew-bark:
+    volumes:
+      - ${BARK_DB_PATH:?set BARK_DB_PATH to the self-hosted Bark bbolt database}:/app/bark.db:ro
