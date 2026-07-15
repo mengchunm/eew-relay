@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ghcr.io/mengchunm/eew-relay-geodata:2025.251231.260403
+    image: ghcr.io/mengchunm/eew-relay-geodata@sha256:f110272183566f8dd9e460f6453b959a6273d1029447c9bfba2df5b0bb825981
     container_name: eew-postgres
     restart: unless-stopped
     environment:
