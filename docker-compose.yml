@@ -25,7 +25,7 @@ services:
     mem_limit: 256m
     pids_limit: 128
     healthcheck:
-      test: ["CMD-SHELL", "psql -U eew -d eew -Atqc \"SELECT 1 FROM eew_admin_boundary_metadata LIMIT 1\" | grep -qx 1"]
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = postgres && psql -U eew -d eew -Atqc \"SELECT 1 WHERE to_regclass('public.eew_admin_boundary_parts_level_gid_idx') IS NOT NULL AND EXISTS (SELECT 1 FROM eew_admin_boundary_metadata)\" | grep -qx 1"]
       interval: 5s
       timeout: 5s
       retries: 60
