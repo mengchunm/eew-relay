@@ -1,0 +1,135 @@
+bark:
+  # Default Bark server used for new subscribers.
+  server: "https://bark.saevio.top"
+  # Optional self-hosted Bark server shown on the subscription page.
+  self_hosted_server: "https://bark.saevio.top"
+  # Optional internal endpoint used only by this service when sending to the
+  # self-hosted Bark server. In Docker Compose this avoids going out through
+  # Cloudflare/Tunnel and back to the same machine.
+  self_hosted_internal_server: "http://bark-server:8080"
+  # Read-only bbolt database from the self-hosted Bark Server. Used to verify
+  # that a submitted Bark Key has already been created in the Bark App.
+  device_db_path: "/app/bark.db"
+  # Optional MySQL DSN after Bark device migration. Prefer
+  # EEW_BARK_DEVICE_DSN in production; it takes precedence over device_db_path.
+  device_db_dsn: ""
+  level: "critical" # critical, timeSensitive, active, passive
+  sound: "alarm"
+  volume: 10
+  group: "地震预警"
+  call: true
+  request_timeout_seconds: 8
+
+server:
+  host: "0.0.0.0"
+  port: 30010
+  data_path: "./data/subscriptions.json"
+  # Optional PostgreSQL source of truth. The JSON file is imported automatically
+  # when the database is empty. Prefer EEW_POSTGRES_DSN in production.
+  postgres_dsn: ""
+  # Local cache for historical earthquake records. Latest Wolfx records are merged
+  # into this file, while built-in major historical earthquakes are always available.
+  history_path: "./data/history.json"
+  # Persistent delivery audit logs for real EEW events. Each event writes JSONL
+  # details plus a summary JSON, useful for checking missed or delayed pushes.
+  audit_path: "./data/audit"
+  # Delete compressed detail logs and summaries older than this many days.
+  audit_retention_days: 14
+  history_refresh_minutes: 60
+  # Address search proxy. Default uses OpenStreetMap Nominatim and returns up
+  # to 6 China-biased results. Reverse geocoding uses local PostGIS boundaries.
+  geocode_url: "https://nominatim.openstreetmap.org/search"
+  public_url: "https://eew.example.com"
+  # Optional. Set a long random token to enable POST /api/admin/simulate.
+  # Send it as Authorization: Bearer <token>; never place it in a URL.
+  simulate_token: ""
+  # Per-client token-bucket limits. Cloudflare forwarding headers are honored.
+  rate_limit_per_minute: 240
+  rate_limit_burst: 60
+  expensive_rate_limit_per_minute: 60
+  expensive_rate_limit_burst: 20
+  simulation_rate_limit_per_minute: 12
+  simulation_rate_limit_burst: 4
+  # Pause new web subscriptions without affecting existing subscribers.
+  subscription_paused: false
+  subscription_paused_message: "由于当前订阅人数较多，且 Bark 官方次数限制，再增加人数会影响预警时间。现决定停止订阅，将在后续恢复，现有已订阅用户不受影响，可正常接收地震预警。"
+  # Automatically pause new subscriptions when total subscriptions reach this
+  # number. Set 0 to disable; existing subscribers can still update settings.
+  subscription_limit: 0
+  subscription_limit_message: "当前订阅人数已达到系统容量上限。为保障现有用户地震预警推送速度，已暂时停止新增订阅；现有已订阅用户不受影响，可正常接收地震预警。"
+
+wolfx:
+  # all_eew receives JMA, Sichuan, CENC, Fujian, Chongqing and compatible EEW messages.
+  websocket_url: "wss://ws-api.wolfx.jp/all_eew"
+  reconnect_min_seconds: 1
+  reconnect_max_seconds: 30
+  # Buffer WebSocket payloads while the current event is being dispatched.
+  event_queue_size: 256
+  # Mark /health unhealthy if no Wolfx application message arrives in this window.
+  health_stale_seconds: 180
+
+alert:
+  push_updates: true
+  update_min_report_gap: 1
+  ignore_training: true
+  ignore_cancel: true
+  s_wave_km_s: 3.5
+  p_wave_km_s: 6.0
+  stale_origin_seconds: 600
+  dedup_keep_minutes: 120
+  max_distance_km: 1000
+  # Official api.day.app fanout. Keep this conservative because official Bark
+  # rejects excessive concurrent TCP connections and bans abnormal error bursts.
+  fanout_concurrency: 300
+  # Self-hosted Bark fanout. This server has no official Bark rate limit, so it
+  # can run much higher to reduce alert fanout latency.
+  self_hosted_fanout_concurrency: 750
+  # Stop sending temporarily if Bark returns too many 4xx/5xx responses in a
+  # 5-minute window. Bark bans abnormal IPs at 1000 error responses / 5 minutes.
+  fanout_error_budget: 800
+  # Quarantine a Bark Key for 24 hours after repeated 400/404 responses.
+  key_failure_threshold: 3
+  key_quarantine_minutes: 1440
+  # Retry only transient delivery failures: network errors, 429 and 5xx.
+  # 400/404/BadDeviceToken are treated as permanent and are not retried.
+  send_retry_attempts: 1
+  send_retry_delay_ms: 300
+
+  # Alert detail links embedded in Bark notifications. Each pushed user gets a
+  # small in-memory detail record; keep capacity above user count * expected
+  # report updates while bounding memory use during large earthquakes.
+  alert_detail_ttl_hours: 24
+  alert_detail_max_items: 60000
+  # Optional. Bark opens this URL when the notification is tapped.
+  # Leave empty to open a map at the epicenter.
+  click_url: ""
+  # Button shown on the alert detail page.
+  # This URL opens the official China Earthquake Networks Center report page.
+  wechat_url: "https://data.earthquake.cn/datashare/report.shtml?PAGEID=earthquake_subao"
+
+# Optional authenticated burst fanout node. Targets are assigned by a stable
+# Bark Key hash. Failed relay batches retry once with the same idempotency key,
+# then fall back to the primary node.
+relay:
+  url: ""
+  token: ""
+  listen: "0.0.0.0:30012"
+  share_percent: 0
+  batch_size: 250
+  max_inflight_batches: 2
+  concurrency: 400
+  max_batch_size: 500
+  request_timeout_seconds: 8
+
+# Optional durable fanout queue. When enabled, self-hosted Bark targets are
+# split into JetStream tasks and consumed by one or more -queue-worker processes.
+queue:
+  url: ""
+  token: ""
+  stream: "EEW_PUSH"
+  subject: "eew.push.task"
+  durable: "eew-push-workers"
+  batch_size: 500
+  max_inflight_batches: 8
+  worker_concurrency: 400
+  request_timeout_seconds: 20

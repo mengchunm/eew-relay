@@ -1,0 +1,36 @@
+services:
+  eew-bark:
+    image: eew-bark:local
+    build: .
+    container_name: eew-bark
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:30010:30010"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ${BARK_DB_PATH:-./bark.db}:/app/bark.db:ro
+    environment:
+      TZ: Asia/Shanghai
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:30010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

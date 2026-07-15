@@ -1,0 +1,372 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/nats-io/nats.go"
+)
+
+type PushQueueClient struct {
+	cfg QueueConfig
+	nc  *nats.Conn
+	js  nats.JetStreamContext
+}
+
+func NewPushQueueClient(cfg QueueConfig) (*PushQueueClient, error) {
+	if strings.TrimSpace(cfg.URL) == "" {
+		return nil, nil
+	}
+	nc, js, err := connectPushQueue(cfg, "eew-dispatcher")
+	if err != nil {
+		return nil, err
+	}
+	return &PushQueueClient{cfg: cfg, nc: nc, js: js}, nil
+}
+
+func connectPushQueue(cfg QueueConfig, name string) (*nats.Conn, nats.JetStreamContext, error) {
+	options := []nats.Option{
+		nats.Name(name),
+		nats.Timeout(3 * time.Second),
+		nats.PingInterval(20 * time.Second),
+		nats.MaxPingsOutstanding(3),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+	}
+	if strings.TrimSpace(cfg.Token) != "" {
+		options = append(options, nats.Token(strings.TrimSpace(cfg.Token)))
+	}
+	nc, err := nats.Connect(cfg.URL, options...)
+	if err != nil {
+		return nil, nil, err
+	}
+	js, err := nc.JetStream(nats.PublishAsyncMaxPending(256))
+	if err != nil {
+		nc.Close()
+		return nil, nil, err
+	}
+	if _, err := js.StreamInfo(cfg.Stream); err != nil {
+		if !errors.Is(err, nats.ErrStreamNotFound) {
+			nc.Close()
+			return nil, nil, err
+		}
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name:      cfg.Stream,
+			Subjects:  []string{cfg.Subject},
+			Retention: nats.WorkQueuePolicy,
+			Storage:   nats.FileStorage,
+			MaxAge:    10 * time.Minute,
+			Discard:   nats.DiscardOld,
+		})
+		if err != nil {
+			nc.Close()
+			return nil, nil, err
+		}
+	}
+	return nc, js, nil
+}
+
+func (c *PushQueueClient) Close() {
+	if c == nil || c.nc == nil {
+		return
+	}
+	_ = c.nc.Drain()
+	c.nc.Close()
+}
+
+func sendFanoutQueueGroup(ctx context.Context, notifier *Notifier, event Event, targets []fanoutTarget, out chan<- fanoutResult) {
+	if len(targets) == 0 || notifier == nil || notifier.queue == nil {
+		return
+	}
+	batchSize := notifier.queue.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	type queueBatch struct {
+		index   int
+		targets []fanoutTarget
+	}
+	var batches []queueBatch
+	for start := 0; start < len(targets); start += batchSize {
+		end := start + batchSize
+		if end > len(targets) {
+			end = len(targets)
+		}
+		batches = append(batches, queueBatch{index: len(batches), targets: targets[start:end]})
+	}
+	jobs := make(chan queueBatch)
+	workers := notifier.queue.cfg.MaxInflightBatches
+	if workers <= 0 {
+		workers = 8
+	}
+	if workers > len(batches) {
+		workers = len(batches)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for batch := range jobs {
+				results, err := notifier.queue.sendBatch(ctx, event, batch.index, batch.targets)
+				if err != nil {
+					log.Printf("push queue batch fallback id=%s report=%d batch=%d size=%d: %v", event.EventID, event.ReportNum, batch.index, len(batch.targets), err)
+					sendFanoutGroup(ctx, notifier, event, batch.targets, len(batch.targets), out)
+					continue
+				}
+				for _, result := range results {
+					out <- result
+				}
+			}
+		}()
+	}
+	for _, batch := range batches {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		case jobs <- batch:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func sendFanoutQueuePlans(ctx context.Context, cfg Config, notifier *Notifier, alertCache *AlertCache, event Event, plans []queuedFanoutPlan, collect bool) (int, int, int, []fanoutResult) {
+	if len(plans) == 0 || notifier == nil || notifier.queue == nil {
+		return 0, 0, 0, nil
+	}
+	batchSize := notifier.queue.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 250
+	}
+	type planBatch struct {
+		index int
+		plans []queuedFanoutPlan
+	}
+	var batches []planBatch
+	for start := 0; start < len(plans); start += batchSize {
+		end := start + batchSize
+		if end > len(plans) {
+			end = len(plans)
+		}
+		batches = append(batches, planBatch{index: len(batches), plans: plans[start:end]})
+	}
+	jobs := make(chan planBatch)
+	results := make(chan fanoutResult, batchSize)
+	workers := notifier.queue.cfg.MaxInflightBatches
+	if workers <= 0 {
+		workers = 2
+	}
+	if workers > len(batches) {
+		workers = len(batches)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for batch := range jobs {
+				targets := make([]fanoutTarget, len(batch.plans))
+				for index, plan := range batch.plans {
+					options := pushOptions(cfg, event, plan.Sub, plan.Decision)
+					targets[index] = buildFanoutTarget(cfg, event, alertCache, plan.Sub, plan.Decision, options, plan.Level, plan.Priority)
+				}
+				batchResults, err := notifier.queue.sendBatch(ctx, event, batch.index, targets)
+				if err != nil {
+					log.Printf("push queue batch fallback id=%s report=%d batch=%d size=%d: %v", event.EventID, event.ReportNum, batch.index, len(targets), err)
+					fallback := make(chan fanoutResult, len(targets))
+					go func() {
+						sendFanoutGroup(ctx, notifier, event, targets, len(targets), fallback)
+						close(fallback)
+					}()
+					for result := range fallback {
+						results <- result
+					}
+					continue
+				}
+				for _, result := range batchResults {
+					results <- result
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, batch := range batches {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- batch:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	verbose := len(plans) <= 10000
+	var pushed, skipped, failed int
+	var collected []fanoutResult
+	if collect {
+		collected = make([]fanoutResult, 0, len(plans))
+	}
+	for result := range results {
+		if collect {
+			collected = append(collected, result)
+		}
+		switch {
+		case result.Pushed:
+			pushed++
+			if verbose {
+				log.Printf("pushed id=%s report=%d bark=%s server=%s type=%s level=%s elapsed=%s retries=%d", event.EventID, event.ReportNum, maskKey(result.Target.Sub.BarkID), result.Target.Sub.BarkServer, event.Type, result.Target.Level, result.Elapsed, result.Retries)
+			}
+		case result.Skipped:
+			skipped++
+		default:
+			failed++
+			log.Printf("bark send failed id=%s bark=%s server=%s type=%s level=%s: %v", event.EventID, maskKey(result.Target.Sub.BarkID), result.Target.Sub.BarkServer, event.Type, result.Target.Level, result.Err)
+		}
+	}
+	return pushed, skipped, failed, collected
+}
+
+func (c *PushQueueClient) sendBatch(ctx context.Context, event Event, batchIndex int, targets []fanoutTarget) ([]fanoutResult, error) {
+	payload := relayFanoutRequest{ID: relayBatchID(event, batchIndex, targets), Targets: make([]relayPushTarget, len(targets))}
+	for i, target := range targets {
+		payload.Targets[i] = relayPushTarget{
+			Server: target.Sub.BarkServer, Key: target.Sub.BarkID, Title: target.Title,
+			Subtitle: target.Subtitle, Body: target.Body, Params: target.Params, Options: target.Options,
+		}
+	}
+	inbox := nats.NewInbox()
+	payload.ResultSubject = inbox
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	sub, err := c.nc.SubscribeSync(inbox)
+	if err != nil {
+		return nil, err
+	}
+	defer sub.Unsubscribe()
+	if err := c.nc.Flush(); err != nil {
+		return nil, err
+	}
+	msg := &nats.Msg{Subject: c.cfg.Subject, Data: data, Header: nats.Header{}}
+	msg.Header.Set(nats.MsgIdHdr, payload.ID)
+	if _, err := c.js.PublishMsg(msg); err != nil {
+		return nil, err
+	}
+	timeout := time.Duration(c.cfg.RequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resultMsg, err := sub.NextMsgWithContext(waitCtx)
+	if err != nil {
+		return nil, err
+	}
+	var response relayFanoutResponse
+	if err := json.Unmarshal(resultMsg.Data, &response); err != nil {
+		return nil, err
+	}
+	return fanoutResultsFromResponse(payload, response, targets)
+}
+
+func fanoutResultsFromResponse(payload relayFanoutRequest, response relayFanoutResponse, targets []fanoutTarget) ([]fanoutResult, error) {
+	if response.ID != payload.ID || len(response.Results) != len(targets) {
+		return nil, errors.New("queue response mismatch")
+	}
+	results := make([]fanoutResult, len(targets))
+	seen := make([]bool, len(targets))
+	for _, item := range response.Results {
+		if item.Index < 0 || item.Index >= len(targets) || seen[item.Index] {
+			return nil, errors.New("queue result index mismatch")
+		}
+		seen[item.Index] = true
+		result := fanoutResult{Target: targets[item.Index], Pushed: item.Pushed, Retries: item.Retries, Elapsed: time.Duration(item.ElapsedMS) * time.Millisecond}
+		if item.Error != "" {
+			result.Err = errors.New(item.Error)
+		}
+		results[item.Index] = result
+	}
+	return results, nil
+}
+
+func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) error {
+	if strings.TrimSpace(cfg.Queue.URL) == "" {
+		return errors.New("queue URL is required")
+	}
+	nc, js, err := connectPushQueue(cfg.Queue, "eew-push-worker")
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+	sem := make(chan struct{}, cfg.Queue.WorkerConcurrency)
+	handler := func(msg *nats.Msg) {
+		var payload relayFanoutRequest
+		if err := json.Unmarshal(msg.Data, &payload); err != nil || payload.ID == "" || len(payload.Targets) == 0 || len(payload.Targets) > cfg.Queue.BatchSize {
+			_ = msg.Term()
+			return
+		}
+		started := time.Now()
+		response := processQueuedFanout(ctx, notifier, payload, sem)
+		log.Printf("push queue batch processed id=%s targets=%d duration=%s", payload.ID, len(payload.Targets), time.Since(started))
+		data, err := json.Marshal(response)
+		if err != nil {
+			_ = msg.Nak()
+			return
+		}
+		if payload.ResultSubject == "" || nc.Publish(payload.ResultSubject, data) != nil || nc.Flush() != nil {
+			_ = msg.NakWithDelay(250 * time.Millisecond)
+			return
+		}
+		_ = msg.AckSync()
+	}
+	_, err = js.QueueSubscribe(cfg.Queue.Subject, cfg.Queue.Durable, handler,
+		nats.Durable(cfg.Queue.Durable), nats.BindStream(cfg.Queue.Stream), nats.ManualAck(),
+		nats.AckExplicit(), nats.AckWait(2*time.Minute), nats.MaxAckPending(64))
+	if err != nil {
+		return err
+	}
+	log.Printf("push queue worker subject=%s durable=%s concurrency=%d", cfg.Queue.Subject, cfg.Queue.Durable, cfg.Queue.WorkerConcurrency)
+	<-ctx.Done()
+	_ = nc.Drain()
+	return nil
+}
+
+func processQueuedFanout(ctx context.Context, notifier *Notifier, payload relayFanoutRequest, sem chan struct{}) relayFanoutResponse {
+	response := relayFanoutResponse{ID: payload.ID, Results: make([]relayItemResult, len(payload.Targets))}
+	var wg sync.WaitGroup
+	for index := range payload.Targets {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				response.Results[index] = relayItemResult{Index: index, Error: ctx.Err().Error()}
+				return
+			}
+			target := payload.Targets[index]
+			started := time.Now()
+			retries, err := notifier.SendWithRetry(ctx, target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
+			item := relayItemResult{Index: index, Pushed: err == nil, Retries: retries, ElapsedMS: time.Since(started).Milliseconds()}
+			if err != nil {
+				item.Error = err.Error()
+			}
+			response.Results[index] = item
+		}(index)
+	}
+	wg.Wait()
+	return response
+}

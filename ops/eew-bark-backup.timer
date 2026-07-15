@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily EEW PostgreSQL and Bark MySQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=eew-bark-backup.service
+
+[Install]
+WantedBy=timers.target

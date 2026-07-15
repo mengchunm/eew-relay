@@ -1,0 +1,39 @@
+# Local configuration and credentials
+/config.yaml
+/config.yaml.*
+/.env
+/.env.*
+!/.env.example
+*.pem
+*.key
+
+# Runtime data and sensitive exports
+/data/
+/exports/
+/bark.db*
+/problem-official-subscriptions-*.json
+*.log
+
+# Build and test output
+/eew-bark
+/eew-bark.exe
+/eew-bark-*
+/bin/
+/dist/
+/output/
+/tmp/
+/$cover
+/coverage.out
+/coverage.html
+*.test
+*.prof
+*.tar
+*.tar.gz
+*.zip
+
+# Editor and operating-system files
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+Thumbs.db

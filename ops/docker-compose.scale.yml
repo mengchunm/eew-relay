@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.5-alpine
+    container_name: eew-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eew
+      POSTGRES_USER: eew
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=192MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=30
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks: [eew]
+    mem_limit: 256m
+    pids_limit: 128
+    oom_score_adj: -300
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eew -d eew"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  mysql:
+    image: mysql:8.4
+    container_name: bark-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: bark
+      MYSQL_USER: bark
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --max-connections=40
+      - --table-open-cache=256
+      - --skip-log-bin
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    networks: [eew]
+    mem_limit: 320m
+    pids_limit: 256
+    oom_score_adj: -300
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    logging: *logging
+
+  nats:
+    image: nats:2.11-alpine
+    container_name: eew-nats
+    restart: unless-stopped
+    command: ["--config", "/etc/nats/nats.conf", "--auth", "${NATS_TOKEN}"]
+    volumes:
+      - ./data/nats:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    networks: [eew]
+    mem_limit: 96m
+    pids_limit: 128
+    oom_score_adj: -350
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  push-worker-a:
+    image: eew-bark:local
+    container_name: eew-push-worker-a
+    restart: unless-stopped
+    command: ["-config", "/app/config.yaml", "-queue-worker"]
+    env_file: [.env]
+    environment:
+      TZ: Asia/Shanghai
+      EEW_NATS_URL: nats://eew-nats:4222
+      EEW_BARK_DEVICE_DSN: bark:${MYSQL_PASSWORD}@tcp(bark-mysql:3306)/bark
+    volumes:
+      - ${EEW_CONFIG_PATH:-../config.yaml}:/app/config.yaml:ro
+    networks: [eew]
+    read_only: true
+    tmpfs:
+      - "/tmp:size=8m,mode=1777,noexec,nosuid,nodev"
+    mem_limit: 192m
+    pids_limit: 512
+    oom_score_adj: -450
+    depends_on:
+      nats: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+    logging: *logging
+
+  push-worker-b:
+    extends: push-worker-a
+    container_name: eew-push-worker-b
+
+networks:
+  eew:
+    name: ${EEW_DOCKER_NETWORK:-eew-relay}
+    external: true
