@@ -8,13 +8,9 @@ LABEL org.opencontainers.image.title="EEW Relay fixed China administrative bound
       org.opencontainers.image.version="${EEW_GEODATA_VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
-COPY AREA_CITY_LICENSE /usr/share/licenses/AreaCity-JsSpider-StatsGov/LICENSE
-COPY data/eew-admin-boundaries.sql.gz /docker-entrypoint-initdb.d/20-eew-admin-boundaries.sql.gz
-COPY data/eew-admin-boundary-indexes.sql /docker-entrypoint-initdb.d/21-eew-admin-boundary-indexes.sql
+COPY --chmod=0444 AREA_CITY_LICENSE /usr/share/licenses/AreaCity-JsSpider-StatsGov/LICENSE
+COPY --chmod=0444 data/eew-admin-boundaries.sql.gz /docker-entrypoint-initdb.d/20-eew-admin-boundaries.sql.gz
+COPY --chmod=0444 data/eew-admin-boundary-indexes.sql /docker-entrypoint-initdb.d/21-eew-admin-boundary-indexes.sql
 
 RUN test -s /docker-entrypoint-initdb.d/20-eew-admin-boundaries.sql.gz \
-    && test -s /docker-entrypoint-initdb.d/21-eew-admin-boundary-indexes.sql \
-    && chmod 0444 \
-        /usr/share/licenses/AreaCity-JsSpider-StatsGov/LICENSE \
-        /docker-entrypoint-initdb.d/20-eew-admin-boundaries.sql.gz \
-        /docker-entrypoint-initdb.d/21-eew-admin-boundary-indexes.sql
+    && test -s /docker-entrypoint-initdb.d/21-eew-admin-boundary-indexes.sql
