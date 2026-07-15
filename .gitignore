@@ -31,6 +31,10 @@
 *.tar.gz
 *.zip
 
+# Fixed geodata image build inputs are published as container layers, not Git blobs
+/ops/geodata/data/*.sql
+/ops/geodata/data/*.sql.gz
+
 # Editor and operating-system files
 /.idea/
 /.vscode/

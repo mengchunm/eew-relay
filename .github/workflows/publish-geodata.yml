@@ -1,0 +1,123 @@
+name: Publish fixed geodata image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GEODATA_VERSION: "2025.251231.260403"
+  GEODATA_RELEASE: "geodata-2025.251231.260403"
+  IMAGE: "ghcr.io/mengchunm/eew-relay-geodata:2025.251231.260403"
+  BOUNDARIES_SHA256: "c1af4e077c1253aec3b1f3279eaf693dcfce1f53ebfee45a2aa2546b35295da0"
+  INDEXES_SHA256: "1d7ec5df0d72a116ac83807a58b3cc8aefb99ef7d45071ef3df15dd542ca4cea"
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download fixed release data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ops/geodata/data
+          gh release download "${GEODATA_RELEASE}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'eew-admin-boundaries.sql.gz' \
+            --pattern 'eew-admin-boundary-indexes.sql' \
+            --dir ops/geodata/data
+          printf '%s  %s\n' \
+            "${BOUNDARIES_SHA256}" ops/geodata/data/eew-admin-boundaries.sql.gz \
+            "${INDEXES_SHA256}" ops/geodata/data/eew-admin-boundary-indexes.sql \
+            | sha256sum --check --strict
+
+      - name: Build fixed image
+        run: |
+          docker build \
+            --build-arg "EEW_GEODATA_VERSION=${GEODATA_VERSION}" \
+            --tag "${IMAGE}" \
+            ops/geodata
+
+      - name: Validate fresh database initialization
+        run: |
+          password="$(openssl rand -hex 32)"
+          docker volume create eew-geodata-ci >/dev/null
+          docker run -d \
+            --name eew-geodata-ci \
+            -e POSTGRES_DB=eew \
+            -e POSTGRES_USER=eew \
+            -e POSTGRES_PASSWORD="${password}" \
+            -v eew-geodata-ci:/var/lib/postgresql/data \
+            --health-cmd='psql -U eew -d eew -Atqc "SELECT 1 FROM eew_admin_boundary_metadata LIMIT 1" | grep -qx 1' \
+            --health-interval=5s \
+            --health-timeout=5s \
+            --health-retries=180 \
+            --health-start-period=30s \
+            "${IMAGE}" >/dev/null
+
+          for attempt in $(seq 1 180); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' eew-geodata-ci)"
+            if [ "${status}" = healthy ]; then
+              break
+            fi
+            if [ "${status}" = unhealthy ]; then
+              docker logs eew-geodata-ci
+              exit 1
+            fi
+            sleep 5
+          done
+
+          test "$(docker inspect --format '{{.State.Health.Status}}' eew-geodata-ci)" = healthy
+          docker exec -i eew-geodata-ci psql -v ON_ERROR_STOP=1 -U eew -d eew <<'SQL'
+          DO $validate$
+          BEGIN
+            IF (SELECT count(*) FROM eew_admin_boundaries WHERE level = 1) <> 34 THEN
+              RAISE EXCEPTION 'unexpected province count';
+            END IF;
+            IF (SELECT count(*) FROM eew_admin_boundaries WHERE level = 2) <> 372 THEN
+              RAISE EXCEPTION 'unexpected city count';
+            END IF;
+            IF (SELECT count(*) FROM eew_admin_boundaries WHERE level = 3) <> 2851 THEN
+              RAISE EXCEPTION 'unexpected district count';
+            END IF;
+            IF (SELECT count(*) FROM eew_admin_boundary_parts) <> 72072 THEN
+              RAISE EXCEPTION 'unexpected boundary part count';
+            END IF;
+            IF (SELECT count(*) FROM eew_admin_boundaries WHERE NOT ST_IsValid(geom)) <> 0 THEN
+              RAISE EXCEPTION 'invalid administrative geometry';
+            END IF;
+            IF (SELECT count(*) FROM eew_admin_boundary_parts WHERE NOT ST_IsValid(geom)) <> 0 THEN
+              RAISE EXCEPTION 'invalid boundary part geometry';
+            END IF;
+            IF (SELECT count(*) FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname IN (
+                    'eew_admin_boundaries_new_pkey',
+                    'eew_admin_boundaries_geom_gist',
+                    'eew_admin_boundaries_level_idx',
+                    'eew_admin_boundary_parts_geom_gist',
+                    'eew_admin_boundary_parts_level_gid_idx'
+                  )) <> 5 THEN
+              RAISE EXCEPTION 'missing administrative boundary index';
+            END IF;
+          END
+          $validate$;
+          SQL
+
+      - name: Publish image
+        run: |
+          printf '%s' "${{ github.token }}" \
+            | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}"
+
+      - name: Record image digest
+        run: |
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}")"
+          printf 'Published `%s`\n' "${digest}" >> "${GITHUB_STEP_SUMMARY}"

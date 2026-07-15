@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgis/postgis:16-3.5-alpine
+    image: ghcr.io/mengchunm/eew-relay-geodata:2025.251231.260403
     container_name: eew-postgres
     restart: unless-stopped
     environment:
@@ -25,10 +25,11 @@ services:
     mem_limit: 256m
     pids_limit: 128
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eew -d eew"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
+      test: ["CMD-SHELL", "psql -U eew -d eew -Atqc \"SELECT 1 FROM eew_admin_boundary_metadata LIMIT 1\" | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
     logging:
       driver: json-file
       options:

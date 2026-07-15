@@ -317,7 +317,9 @@ https://eew.example.com/alert/{token}
 
 反向地理解析使用 PostgreSQL/PostGIS 中的中国行政区边界，不调用高德接口。边界数据来自 `AreaCity-JsSpider-StatsGov` 的 `2025.251231.260403` 版本，保留原始 GCJ-02 坐标；应用查询时只把输入的 WGS84 点转换为 GCJ-02。
 
-默认 Docker Compose 已包含与生产版相同的 PostGIS 服务。若没有执行 `ops/import-china-boundaries.sh`，地图点击、设备定位和地址搜索只能退化显示经纬度，因此边界导入属于完整部署的必需步骤。
+默认 Docker Compose 已包含固定版本的 PostGIS 行政区数据镜像。首次使用空数据库目录启动时，镜像会自动写入与生产版相同的边界表和空间索引；部署者不需要下载、转换或手工导入行政区数据。应用更新不会重新导入或改变这份固定数据。
+
+固定数据版本为 `2025.251231.260403`。首次初始化需要解压边界数据并创建空间索引，因此 PostgreSQL 进入健康状态会比普通启动更慢；后续启动直接复用 `./data/postgres`，不会重复初始化。
 
 参考数据包含省、市和区县级边界。`eew_admin_boundary_parts` 将高精度多边形预切为小块并建立 GiST 索引，避免大型几何在冷缓存下触发查询超时。地址正向搜索使用 Nominatim，并带全局限速和进程内缓存。
 
@@ -325,7 +327,7 @@ https://eew.example.com/alert/{token}
 
 通知规则在网页端按“烈度阈值及以上使用某提醒方式”配置，阈值下拉统一显示为 `2.0及以上` 这类一位小数选项。系统按阈值自动生成连续区间，例如 `2.0及以上` 勿扰静音不响铃、`3.0及以上` 强行响铃会生成 `[2.0, 3.0)` active 和 `[3.0, +∞)` critical。若较弱提醒的阈值不低于更强提醒，网页会从更强提醒阈值向下逐级调整，例如 critical 为 `3.0`、active 误选 `5.0` 时，active 自动调整为 `2.0`。最后一条规则自动作为开放式上限。
 
-本地转换后可直接上传压缩的 GeoJSON Sequence 并导入：
+`ops/import-china-boundaries.sh` 只保留为维护者更换自定义数据集时的工具，正常开源部署不需要执行。若确实要自行替换数据，可在隔离数据库中先完成本地转换，再导入：
 
 ```bash
 python tools/convert_areacity.py ok_geo.csv areacity.geojsonseq.gz
