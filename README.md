@@ -16,7 +16,7 @@
 - 统计 API：`GET /api/stats`
 - 健康检查：`GET /health`
 - 数据源：`wss://ws-api.wolfx.jp/all_eew`
-- 存储：本地 JSON 文件，默认 `./data/subscriptions.json`
+- 存储：PostgreSQL/PostGIS；首次启动会自动导入 `./data/subscriptions.json`
 - 部署：单二进制或 Docker Compose
 
 ## 本地运行
@@ -56,8 +56,10 @@ go run . -config config.yaml -test-bark YOUR_BARK_KEY
 ```bash
 umask 077
 cp config.example.yaml config.yaml
+cp .env.example .env
+sed -i "s/replace_with_a_long_random_hex_value/$(openssl rand -hex 32)/" .env
 mkdir -p data
-chmod 600 config.yaml
+chmod 600 config.yaml .env
 chmod 700 data
 
 # bbolt 模式：必须指向现有 Bark Server 数据库文件
@@ -69,6 +71,11 @@ docker compose build --pull
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:30010/health
+
+# 按生产版方法导入中国省、市、区县 PostGIS 边界；首次部署必须执行
+ENV_FILE="$PWD/.env" POSTGRES_CONTAINER=eew-postgres DOCKER_NETWORK=eew-relay \
+  sh ops/import-china-boundaries.sh
+docker compose restart eew-bark
 ```
 
 查看日志时不要在工单或聊天中粘贴包含凭据的历史日志：
@@ -77,7 +84,7 @@ curl -fsS http://127.0.0.1:30010/health
 docker compose logs --tail=200 -f eew-bark
 ```
 
-Compose 已启用容器健康检查、只读根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 是唯一的应用可写持久化目录；自建 Bark 的 `bark.db` 仍以只读方式挂载。
+Compose 已启用 PostgreSQL/PostGIS、容器健康检查、只读应用根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 保存 PostgreSQL、历史数据和审计数据；自建 Bark 的 `bark.db` 仍以只读方式挂载。
 
 若使用 MySQL 设备库，设置 `EEW_BARK_DEVICE_DSN` 后仍需为 Compose 的只读挂载提供一个普通占位文件，或按实际部署方式移除 `bark.db` 挂载。设备库只用于确认 Bark Key 已在当前自建 Bark Server 注册。
 
@@ -309,6 +316,8 @@ https://eew.example.com/alert/{token}
 ## 离线行政区解析
 
 反向地理解析使用 PostgreSQL/PostGIS 中的中国行政区边界，不调用高德接口。边界数据来自 `AreaCity-JsSpider-StatsGov` 的 `2025.251231.260403` 版本，保留原始 GCJ-02 坐标；应用查询时只把输入的 WGS84 点转换为 GCJ-02。
+
+默认 Docker Compose 已包含与生产版相同的 PostGIS 服务。若没有执行 `ops/import-china-boundaries.sh`，地图点击、设备定位和地址搜索只能退化显示经纬度，因此边界导入属于完整部署的必需步骤。
 
 参考数据包含省、市和区县级边界。`eew_admin_boundary_parts` 将高精度多边形预切为小块并建立 GiST 索引，避免大型几何在冷缓存下触发查询超时。地址正向搜索使用 Nominatim，并带全局限速和进程内缓存。
 
