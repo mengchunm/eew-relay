@@ -247,6 +247,7 @@ var beijingTZ = time.FixedZone("Asia/Shanghai", 8*3600)
 
 const notificationOpenEndedMax = 99
 const officialReportURL = "https://data.earthquake.cn/datashare/report.shtml?PAGEID=earthquake_subao"
+const projectUserAgent = "eew-relay/1.0 (+https://github.com/mengchunm/eew-relay)"
 const defaultSelfHostedFanoutConcurrency = 750
 const maxSelfHostedFanoutConcurrency = 1000
 
@@ -572,11 +573,30 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	cfg.Bark.Server = strings.TrimRight(strings.TrimSpace(cfg.Bark.Server), "/")
+	cfg.Bark.SelfHostedServer = strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
+	cfg.Bark.SelfHostedInternalServer = strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedInternalServer), "/")
+	if cfg.Bark.Server == "" && cfg.Bark.SelfHostedServer == "" {
+		return Config{}, errors.New("bark.server or bark.self_hosted_server is required")
+	}
 	if cfg.Bark.Server == "" {
-		cfg.Bark.Server = "https://bark.saevio.top"
+		cfg.Bark.Server = cfg.Bark.SelfHostedServer
 	}
 	if cfg.Bark.SelfHostedServer == "" {
-		cfg.Bark.SelfHostedServer = "https://bark.saevio.top"
+		cfg.Bark.SelfHostedServer = cfg.Bark.Server
+	}
+	for name, value := range map[string]string{
+		"bark.server":                      cfg.Bark.Server,
+		"bark.self_hosted_server":          cfg.Bark.SelfHostedServer,
+		"bark.self_hosted_internal_server": cfg.Bark.SelfHostedInternalServer,
+	} {
+		if value == "" {
+			continue
+		}
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return Config{}, fmt.Errorf("%s must be an absolute HTTP(S) URL", name)
+		}
 	}
 	if cfg.Bark.DeviceDBPath == "" {
 		cfg.Bark.DeviceDBPath = "/app/bark.db"
@@ -793,9 +813,6 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Server.SimulationRateBurst <= 0 {
 		cfg.Server.SimulationRateBurst = 4
 	}
-	cfg.Bark.Server = strings.TrimRight(cfg.Bark.Server, "/")
-	cfg.Bark.SelfHostedServer = strings.TrimRight(cfg.Bark.SelfHostedServer, "/")
-	cfg.Bark.SelfHostedInternalServer = strings.TrimRight(cfg.Bark.SelfHostedInternalServer, "/")
 	return cfg, nil
 }
 
@@ -2060,6 +2077,12 @@ func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *
 			http.Error(w, "index not found", http.StatusInternalServerError)
 			return
 		}
+		barkServerJSON, err := json.Marshal(normalizeBarkServer("", cfg))
+		if err != nil {
+			http.Error(w, "invalid Bark server configuration", http.StatusInternalServerError)
+			return
+		}
+		data = bytes.ReplaceAll(data, []byte("__EEW_DEFAULT_BARK_SERVER_JSON__"), barkServerJSON)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
@@ -2363,7 +2386,7 @@ func geocodeNominatim(ctx context.Context, cfg Config, query string) ([]GeocodeR
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "eew-bark/1.0 (https://eew.saevio.top)")
+	req.Header.Set("User-Agent", projectUserAgent)
 	req.Header.Set("Accept", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2448,7 +2471,7 @@ func firstAddressPart(address string) string {
 }
 
 func normalizeBarkIDInput(value string) (string, error) {
-	key, _, err := normalizeBarkInput(value, "", Config{Bark: BarkConfig{Server: "https://bark.saevio.top", SelfHostedServer: "https://bark.saevio.top"}})
+	key, _, err := normalizeBarkInput(value, "", Config{Bark: BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://api.day.app"}})
 	return key, err
 }
 
@@ -2494,22 +2517,17 @@ func normalizeBarkServer(server string, cfg Config) string {
 	if server == "" {
 		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.Server), "/")
 	}
-	if server == "" {
-		server = "https://bark.saevio.top"
-	}
-	if server == "https://bark.saevio.dpdns.org" {
-		server = strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
-		if server == "" {
-			server = "https://bark.saevio.top"
-		}
-	}
 	return server
 }
 
 func isAllowedBarkServer(server string, cfg Config) bool {
 	server = normalizeBarkServer(server, cfg)
-	for _, allowed := range []string{cfg.Bark.Server, cfg.Bark.SelfHostedServer, "https://api.day.app", "https://bark.saevio.top", "https://bark.saevio.dpdns.org"} {
-		if server == normalizeBarkServer(allowed, cfg) {
+	if server == "" {
+		return false
+	}
+	for _, allowed := range []string{cfg.Bark.Server, cfg.Bark.SelfHostedServer, "https://api.day.app"} {
+		allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
+		if allowed != "" && server == allowed {
 			return true
 		}
 	}
@@ -2518,8 +2536,8 @@ func isAllowedBarkServer(server string, cfg Config) bool {
 
 func isSelfHostedBarkServer(server string, cfg Config) bool {
 	server = normalizeBarkServer(server, cfg)
-	selfHosted := normalizeBarkServer(cfg.Bark.SelfHostedServer, cfg)
-	return server == selfHosted || server == "https://bark.saevio.top"
+	selfHosted := strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/")
+	return selfHosted != "" && server == selfHosted
 }
 
 func isOfficialBarkServer(server string) bool {
@@ -3042,7 +3060,7 @@ func (p *mapTileProxy) download(ctx context.Context, z, x, y int, retina bool) (
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", "eew.saevio.top map tile cache")
+		req.Header.Set("User-Agent", projectUserAgent)
 		resp, err := p.client.Do(req)
 		if err != nil {
 			lastErr = err
@@ -3339,7 +3357,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
       const s=json.data;
       currentSub=s;
       document.body.classList.add("authorized");
-      document.getElementById("bark-server").textContent=s.bark_server||"https://bark.saevio.top";
+      document.getElementById("bark-server").textContent=s.bark_server||"未配置";
       const locs=Array.isArray(s.locations)&&s.locations.length?s.locations:[{name:s.location_name||"",latitude:s.latitude,longitude:s.longitude}];
       document.getElementById("pos").innerHTML=renderLocations(locs);
       document.getElementById("updated").textContent=new Date(s.updated_at).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false});
@@ -3566,14 +3584,14 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
     }
   }
   function drawAlertMap(mapInstance){
-    L.tileLayer(tileURL,{maxZoom:18,updateWhenIdle:false,updateWhenZooming:false,keepBuffer:3,zIndex:1,crossOrigin:false}).addTo(mapInstance);
+    L.tileLayer(tileURL,{maxZoom:18,updateWhenIdle:false,updateWhenZooming:false,keepBuffer:3,zIndex:1,crossOrigin:false,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'}).addTo(mapInstance);
     const route=L.polyline([subscriber,epicenter],{color:"#f04438",weight:4,opacity:.9,dashArray:"8 8"}).addTo(mapInstance);
     L.circleMarker(epicenter,{radius:9,color:"#fff",weight:2,fillColor:"#f04438",fillOpacity:1}).addTo(mapInstance);
     L.circleMarker(subscriber,{radius:8,color:"#fff",weight:2,fillColor:"#175cd3",fillOpacity:1}).addTo(mapInstance);
     setTimeout(function(){drawSeismicWaves(mapInstance);},120);
     return route;
   }
-  const map=L.map("map",{zoomControl:false,attributionControl:false,dragging:true,scrollWheelZoom:true,doubleClickZoom:true,boxZoom:true,keyboard:true,tap:true});
+  const map=L.map("map",{zoomControl:false,attributionControl:true,dragging:true,scrollWheelZoom:true,doubleClickZoom:true,boxZoom:true,keyboard:true,tap:true});
   const line=drawAlertMap(map);
   const clearMapArea=document.querySelector(".map-wrap"), statusCard=document.querySelector(".status-card");
   const mapLayer=document.getElementById("map-layer"), fullBtn=document.getElementById("map-full-btn");
@@ -4975,7 +4993,7 @@ func fetchOfficialReports(ctx context.Context, limit int) ([]OfficialReport, err
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "eew-bark/1.0 (https://eew.saevio.top)")
+	req.Header.Set("User-Agent", projectUserAgent)
 	client := &http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

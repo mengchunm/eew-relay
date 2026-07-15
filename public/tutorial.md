@@ -9,7 +9,7 @@
    ![允许权限 3](/tutorial-assets/step-3-3.png)
    ![允许权限 4](/tutorial-assets/step-3-4.png)
 
-4. 为 Bark 配置地震预警服务器：https://bark.saevio.top
+4. 为 Bark 配置部署者提供的地震预警 Bark Server 地址，例如 `https://bark.example.com`。
 
    ![配置服务器 1](/tutorial-assets/step-4-1.jpg)
    ![配置服务器 2](/tutorial-assets/step-4-2.png)

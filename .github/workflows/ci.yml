@@ -15,6 +15,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Verify deployment isolation
+        shell: bash
+        run: |
+          if git grep -n -E 'saevio\.top|bark\.saevio|eew\.saevio'; then
+            echo "production-specific domain found in open-source tree" >&2
+            exit 1
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

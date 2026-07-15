@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestParseCencEvent(t *testing.T) {
@@ -128,9 +130,9 @@ func TestEstimatedIntensityJSONKeepsOneDecimal(t *testing.T) {
 
 func TestWriteDeliveryAudit(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{Server: ServerConfig{AuditPath: dir}, Bark: BarkConfig{Server: "https://bark.saevio.top"}}
+	cfg := Config{Server: ServerConfig{AuditPath: dir}, Bark: BarkConfig{Server: "https://bark.example.test"}}
 	event := Event{EventID: "test/event", ReportNum: 1, Type: "cenc_eew", OriginTime: time.Now(), Magnitude: 5.1}
-	sub := Subscription{BarkID: "secretKey", BarkServer: "https://bark.saevio.top", Latitude: 30.5, Longitude: 104.1}
+	sub := Subscription{BarkID: "secretKey", BarkServer: "https://bark.example.test", Latitude: 30.5, Longitude: 104.1}
 	decision := Decision{EstimatedIntensity: 2, EstimatedIntensityRank: 2, DistanceKM: 120.4, HypocentralKM: 121, SecondsToS: 20}
 	started := time.Now()
 	record := deliveryAuditRecordForTarget(cfg, event, sub, decision, started, started, "pushed", "", "active", 150*time.Millisecond, 0, nil)
@@ -533,8 +535,8 @@ func TestFormatAlertUsesWarningCopy(t *testing.T) {
 
 func TestAddBarkIconParam(t *testing.T) {
 	params := map[string]string{"url": "https://example.com/alert/x"}
-	addBarkIconParam(Config{Server: ServerConfig{PublicURL: "https://eew.saevio.top/"}}, params, "critical")
-	if params["icon"] != "https://eew.saevio.top/bark-icon.png?level=high&v=10" {
+	addBarkIconParam(Config{Server: ServerConfig{PublicURL: "https://eew.example.test/"}}, params, "critical")
+	if params["icon"] != "https://eew.example.test/bark-icon.png?level=high&v=10" {
 		t.Fatalf("unexpected bark icon url: %#v", params)
 	}
 
@@ -552,7 +554,7 @@ func TestAddBarkIconParam(t *testing.T) {
 func TestValidateSubscriptionRejectsMissingOrZeroLocation(t *testing.T) {
 	base := Subscription{
 		BarkID:      "validKey",
-		BarkServer:  "https://bark.saevio.top",
+		BarkServer:  "https://bark.example.test",
 		NotifyRules: defaultNotificationRules(),
 	}
 	if err := validateSubscription(base); err == nil {
@@ -575,7 +577,7 @@ func TestValidateSubscriptionRejectsMissingOrZeroLocation(t *testing.T) {
 func TestValidateSubscriptionRejectsDataThatNormalizationWouldDrop(t *testing.T) {
 	base := Subscription{
 		BarkID:     "validKey",
-		BarkServer: "https://bark.saevio.top",
+		BarkServer: "https://bark.example.test",
 		Locations: []SubscriptionLocation{
 			{Name: "成都", Latitude: 30.5, Longitude: 104.1},
 		},
@@ -747,8 +749,8 @@ func TestNotifierUsesHTTP2AndReusesTLSConnection(t *testing.T) {
 func TestStoreSkipsZeroLocationSubscriptionsOnLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subscriptions.json")
 	data := []byte(`[
-		{"bark_id":"badKey","bark_server":"https://bark.saevio.top","latitude":0,"longitude":0},
-		{"bark_id":"goodKey","bark_server":"https://bark.saevio.top","latitude":30.5,"longitude":104.1}
+		{"bark_id":"badKey","bark_server":"https://bark.example.test","latitude":0,"longitude":0},
+		{"bark_id":"goodKey","bark_server":"https://bark.example.test","latitude":30.5,"longitude":104.1}
 	]`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
@@ -773,7 +775,7 @@ func TestStoreRollsBackMemoryWhenPersistenceFails(t *testing.T) {
 	}
 	original := Subscription{
 		BarkID:       "existingKey",
-		BarkServer:   "https://bark.saevio.top",
+		BarkServer:   "https://bark.example.test",
 		LocationName: "before",
 		Latitude:     30.5,
 		Longitude:    104.1,
@@ -1321,6 +1323,9 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`[hidden] { display: none !important; }`,
 		`manageNav.addEventListener("click"`,
 		`id="unsubscribe" type="button" hidden`,
+		`const defaultBarkServer = __EEW_DEFAULT_BARK_SERVER_JSON__;`,
+		`OpenStreetMap`,
+		`CARTO`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("index is missing secure Bark Key flow %q", required)
@@ -1352,6 +1357,25 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 	}
 	if !strings.Contains(body, `tooltip.textContent = item.name`) || !strings.Contains(body, `savedMarker.bindTooltip(tooltip)`) {
 		t.Fatal("map tooltip must use a text node instead of HTML content")
+	}
+}
+
+func TestRootInjectsConfiguredBarkServer(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Bark: BarkConfig{Server: "https://bark.example.test", SelfHostedServer: "https://bark.example.test"}}
+	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), NewNotifier(cfg.Bark), &RuntimeHealth{})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("root status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "__EEW_DEFAULT_BARK_SERVER_JSON__") || !strings.Contains(body, `const defaultBarkServer = "https://bark.example.test";`) {
+		t.Fatalf("configured Bark server was not injected safely: %q", body)
 	}
 }
 
@@ -1500,7 +1524,7 @@ func TestHTTPSubscribeRejectsUnapprovedBarkServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Bark: BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.saevio.top"}}
+	cfg := Config{Bark: BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test"}}
 	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), NewNotifier(cfg.Bark), &RuntimeHealth{})
 	body := `{"bark_id":"validKey123","bark_server":"http://127.0.0.1:8080","latitude":30.5,"longitude":104.1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/subscribe", strings.NewReader(body))
@@ -1527,8 +1551,26 @@ func TestHTTPSubscribeCreatesFormalSubscriptionAfterTestPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	deviceDBPath := filepath.Join(t.TempDir(), "bark.db")
+	deviceDB, err := bolt.Open(deviceDBPath, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceDB.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("device"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("testOnlyKey"), []byte("test-device-token"))
+	}); err != nil {
+		_ = deviceDB.Close()
+		t.Fatal(err)
+	}
+	if err := deviceDB.Close(); err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
-		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.saevio.top", Group: "test"},
+		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: bark.URL, DeviceDBPath: deviceDBPath, Group: "test"},
 		Alert: AlertConfig{
 			SWaveKMS:          3.5,
 			PWaveKMS:          6,
@@ -1587,7 +1629,7 @@ func TestHTTPSubscribeRejectsNewUserAtCapacityBeforeTestPush(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.saevio.top", Group: "test"},
+		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.example.test", Group: "test"},
 		Server: ServerConfig{
 			SubscriptionLimit:        1,
 			SubscriptionLimitMessage: "capacity reached",
@@ -1626,7 +1668,7 @@ func TestHTTPSubscribeUpdatesExistingSubscription(t *testing.T) {
 	if err := store.Upsert(Subscription{BarkID: "existingKey", BarkServer: bark.URL, Latitude: 30.5, Longitude: 104.1}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.saevio.top", Group: "test"}}
+	cfg := Config{Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.example.test", Group: "test"}}
 	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), NewNotifier(cfg.Bark, cfg.Alert), &RuntimeHealth{})
 	body := fmt.Sprintf(`{"bark_id":"existingKey","bark_server":%q,"latitude":31.2,"longitude":105.3,"locations":[{"name":"更新地点","latitude":31.2,"longitude":105.3}],"notify_bands":[{"min":2,"max":99,"level":"active","label":"勿扰静音不响铃"}]}`, bark.URL)
 	req := httptest.NewRequest(http.MethodPost, "/api/subscribe", strings.NewReader(body))
@@ -1674,7 +1716,7 @@ func TestHTTPSimulationAcceptsTemporarySubscriptionWithoutPersisting(t *testing.
 		t.Fatal(err)
 	}
 	cfg := Config{
-		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.saevio.top", Group: "test"},
+		Bark: BarkConfig{Server: bark.URL, SelfHostedServer: "https://bark.example.test", Group: "test"},
 		Alert: AlertConfig{
 			SWaveKMS:          3.5,
 			PWaveKMS:          6,
@@ -1711,7 +1753,7 @@ func TestNotifierRejectsPersistedUnapprovedBarkServer(t *testing.T) {
 	}))
 	defer evil.Close()
 
-	notifier := NewNotifier(BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.saevio.top"})
+	notifier := NewNotifier(BarkConfig{Server: "https://api.day.app", SelfHostedServer: "https://bark.example.test"})
 	err := notifier.Send(context.Background(), evil.URL, "validKey123", "title", "subtitle", "body", nil, PushOptions{})
 	if err == nil || !strings.Contains(err.Error(), "unapproved Bark server") {
 		t.Fatalf("expected fail-closed server validation, got %v", err)
@@ -1749,7 +1791,7 @@ func TestHTTPSubscriptionRouteAcceptsBearerWithoutRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := Subscription{BarkID: "headerKey", BarkServer: "https://bark.saevio.top", Latitude: 30.5, Longitude: 104.1}
+	sub := Subscription{BarkID: "headerKey", BarkServer: "https://bark.example.test", Latitude: 30.5, Longitude: 104.1}
 	if err := store.Upsert(sub); err != nil {
 		t.Fatal(err)
 	}
@@ -2346,5 +2388,30 @@ func TestLoadConfigRejectsMultipleDocuments(t *testing.T) {
 	}
 	if _, err := loadConfig(path); err == nil {
 		t.Fatal("expected multiple YAML documents to be rejected")
+	}
+}
+
+func TestLoadConfigRequiresConfiguredBarkServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  port: 30010\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "bark.server") {
+		t.Fatalf("expected missing Bark server error, got %v", err)
+	}
+}
+
+func TestLoadConfigUsesConfiguredBarkServerWithoutProductionFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("bark:\n  self_hosted_server: https://bark.example.test/\nserver:\n  port: 30010\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bark.Server != "https://bark.example.test" || cfg.Bark.SelfHostedServer != "https://bark.example.test" {
+		t.Fatalf("unexpected Bark defaults: %#v", cfg.Bark)
 	}
 }

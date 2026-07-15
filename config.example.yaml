@@ -1,12 +1,12 @@
 bark:
   # Default Bark server used for new subscribers.
-  server: "https://bark.saevio.top"
+  server: "https://bark.example.com"
   # Optional self-hosted Bark server shown on the subscription page.
-  self_hosted_server: "https://bark.saevio.top"
+  self_hosted_server: "https://bark.example.com"
   # Optional internal endpoint used only by this service when sending to the
   # self-hosted Bark server. In Docker Compose this avoids going out through
   # Cloudflare/Tunnel and back to the same machine.
-  self_hosted_internal_server: "http://bark-server:8080"
+  self_hosted_internal_server: ""
   # Read-only bbolt database from the self-hosted Bark Server. Used to verify
   # that a submitted Bark Key has already been created in the Bark App.
   device_db_path: "/app/bark.db"

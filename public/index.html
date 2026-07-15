@@ -804,7 +804,7 @@
   <script src="/leaflet/leaflet.js"></script>
   <script>
     const api = location.origin;
-    const defaultBarkServer = "https://bark.saevio.top";
+    const defaultBarkServer = __EEW_DEFAULT_BARK_SERVER_JSON__;
     const form = document.querySelector("#form");
     const statusBox = document.querySelector("#status");
     const barkInput = document.querySelector("#bark-id");
@@ -840,8 +840,8 @@
     let tutorialLoaded = false;
     let existingSubscription = false;
 
-    const map = L.map("map", { zoomControl: true, attributionControl: false }).setView([35.0, 105.0], 4);
-    L.tileLayer("/map-tiles/{z}/{x}/{y}{r}.png", { maxZoom: 18, crossOrigin: false }).addTo(map);
+    const map = L.map("map", { zoomControl: true, attributionControl: true }).setView([35.0, 105.0], 4);
+    L.tileLayer("/map-tiles/{z}/{x}/{y}{r}.png", { maxZoom: 18, crossOrigin: false, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>' }).addTo(map);
     let marker;
     let selectedLocations = [];
     let locationMarkers = [];
@@ -1111,7 +1111,8 @@
         try {
           const url = new URL(text);
           const host = url.hostname.toLowerCase();
-          if (host === "api.day.app" || host === "bark.saevio.top") {
+          const configuredHost = (() => { try { return new URL(defaultBarkServer).hostname.toLowerCase(); } catch { return ""; } })();
+          if (host === "api.day.app" || host === configuredHost) {
             const first = url.pathname.split("/").filter(Boolean)[0] || "";
             text = decodeURIComponent(first);
           }

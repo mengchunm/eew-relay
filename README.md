@@ -45,12 +45,24 @@ go run . -config config.yaml -test-bark YOUR_BARK_KEY
 
 镜像使用固定的 `golang:1.25.12-alpine3.23` 多阶段构建，不依赖本地预编译二进制。部署前先创建仅当前用户可读的配置和数据目录：
 
+部署者必须先完成以下配置，示例域名不能直接用于生产：
+
+- 将 `bark.server` 和 `bark.self_hosted_server` 改成自己的 Bark Server HTTPS 地址。
+- 将 `server.public_url` 改成当前 EEW Relay 的 HTTPS 地址。
+- 准备该 Bark Server 的只读 `bark.db`，或通过 `EEW_BARK_DEVICE_DSN` 连接 Bark MySQL 设备库。
+- 仅当 Bark Server 与 EEW Relay 位于同一容器网络时才设置 `bark.self_hosted_internal_server`。
+- 默认 Wolfx WebSocket 是真实地震信息源；测试 Bark 推送时不要替换或模拟预警计算逻辑。
+
 ```bash
 umask 077
 cp config.example.yaml config.yaml
 mkdir -p data
 chmod 600 config.yaml
 chmod 700 data
+
+# bbolt 模式：必须指向现有 Bark Server 数据库文件
+export BARK_DB_PATH=/absolute/path/to/bark-data/bark.db
+test -f "${BARK_DB_PATH}"
 
 docker compose config --quiet
 docker compose build --pull
@@ -66,6 +78,8 @@ docker compose logs --tail=200 -f eew-bark
 ```
 
 Compose 已启用容器健康检查、只读根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 是唯一的应用可写持久化目录；自建 Bark 的 `bark.db` 仍以只读方式挂载。
+
+若使用 MySQL 设备库，设置 `EEW_BARK_DEVICE_DSN` 后仍需为 Compose 的只读挂载提供一个普通占位文件，或按实际部署方式移除 `bark.db` 挂载。设备库只用于确认 Bark Key 已在当前自建 Bark Server 注册。
 
 `docker-compose.yml` 默认只绑定：
 
@@ -260,7 +274,7 @@ server:
 
 ## 自建 Bark Server
 
-服务支持按订阅保存 Bark 服务器地址。新订阅默认使用自建 `https://bark.saevio.top`；历史上使用官方 `https://api.day.app` 的订阅会继续保留原服务器并正常接收预警。用户需要先在 Bark App 里添加自建服务器，再复制该服务器生成的 Key 到订阅页。
+服务支持按订阅保存 Bark 服务器地址。新订阅使用部署者在 `bark.self_hosted_server` 中配置的自建 Bark Server；历史上使用官方 `https://api.day.app` 的订阅会继续保留原服务器并正常接收预警。用户需要先在 Bark App 里添加该自建服务器，再复制服务器生成的 Key 到订阅页。
 
 下面是将 Bark Server 与本服务部署在同一环境的示例：
 
@@ -362,6 +376,8 @@ https://data.earthquake.cn/datashare/report.shtml?PAGEID=earthquake_subao
 ## 注意
 
 Wolfx 是第三方聚合数据源，Bark/APNs 不是硬实时链路。这个服务适合个人或小范围预警辅助，不应作为唯一生命安全系统。
+
+开源版本不包含任何维护者生产域名或生产凭据。部署和测试应使用独立 Bark Server、独立数据库及独立推送 Key。第三方组件和地图数据说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，安全问题报告方式见 [SECURITY.md](SECURITY.md)。
 
 ## 许可证
 
