@@ -32,6 +32,13 @@ go test ./...
 umask 077
 cp config.example.yaml config.yaml
 cp .env.example .env
+password="$(openssl rand -hex 32)"
+sed -i "s/replace_with_a_long_random_hex_value/${password}/" .env
+unset password
+if grep -q 'replace_with_' .env; then
+  echo "请先替换 .env 中的示例凭据" >&2
+  exit 1
+fi
 mkdir -p data
 chmod 600 config.yaml .env
 chmod 700 data
@@ -46,7 +53,7 @@ chmod 700 data
 - PostgreSQL 密码和 Bark 设备库只读连接；
 - 反向代理的 HTTPS、请求头和真实客户端 IP 配置。
 
-示例值不能直接用于公网。凭据只放在本机受限文件或密钥管理系统中，不提交 Git。
+示例值不能直接用于公网。必须替换 `.env` 的 PostgreSQL 占位密码，并把 `config.yaml` 中的示例域名改为实际 HTTPS 地址。凭据只放在本机受限文件或密钥管理系统中，不提交 Git。
 
 ## Docker Compose 部署
 
@@ -118,4 +125,3 @@ curl -fsS http://127.0.0.1:30010/health
 - [ ] PostgreSQL/PostGIS、Bark 设备库和审计目录持久化正常；
 - [ ] 重启应用后健康检查恢复；
 - [ ] 备份和镜像回滚步骤已实际演练。
-
