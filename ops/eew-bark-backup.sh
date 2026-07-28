@@ -48,10 +48,19 @@ trap cleanup EXIT HUP INT TERM
 install -d -m 700 "$BACKUP_ROOT" "$tmp"
 install -m 600 "$EEW_ROOT/config.yaml" "$tmp/config.yaml"
 install -m 600 "$EEW_ROOT/docker-compose.yml" "$tmp/docker-compose.yml"
+if [ -f "$EEW_ROOT/relay.env" ]; then
+  install -m 600 "$EEW_ROOT/relay.env" "$tmp/relay.env"
+fi
+if [ -f "$EEW_ROOT/.env" ]; then
+  install -m 600 "$EEW_ROOT/.env" "$tmp/app.env"
+fi
 install -m 600 "$SCALE_ROOT/docker-compose.yml" "$tmp/docker-compose.scale.yml"
 install -m 600 "$SCALE_ROOT/nats.conf" "$tmp/nats.conf"
 install -m 600 "$SCALE_ROOT/.env" "$tmp/scale.env"
 install -m 600 "$BARK_ROOT/docker-compose.yml" "$tmp/docker-compose.bark.yml"
+if [ -f "$BARK_ROOT/.env" ]; then
+  install -m 600 "$BARK_ROOT/.env" "$tmp/bark.env"
+fi
 
 "$DOCKER" exec eew-postgres pg_isready -U eew -d eew >/dev/null
 "$DOCKER" exec eew-postgres pg_dump -U eew -d eew --format=custom --compress=6 >"$tmp/eew-postgres.dump"
