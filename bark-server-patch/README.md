@@ -10,11 +10,23 @@ The patch adds:
 - HTTP 404 for missing device keys and HTTP 503 for transient database errors;
 - a process-wide APNs in-flight request limit.
 
-Build it with:
+For development and CI, build the source image with:
 
 ```sh
 docker build -t bark-server:eew-v2.3.5.1 bark-server-patch
 ```
+
+For production, compile and test the Linux binary on the release workstation:
+
+```powershell
+.\bark-server-patch\prepare-release.ps1
+```
+
+The generated `output/bark-server/<version>/` directory contains the pinned,
+patched Linux binary, its checksum and build metadata, the upstream license,
+and `Dockerfile.prebuilt`. Upload that directory to the server and build only
+the small runtime image there; the production server does not clone source or
+run the Go compiler.
 
 Runtime controls:
 
