@@ -63,6 +63,10 @@ type QueueConfig struct {
 	MaxInflightBatches    int    `yaml:"max_inflight_batches"`
 	WorkerConcurrency     int    `yaml:"worker_concurrency"`
 	RequestTimeoutSeconds int    `yaml:"request_timeout_seconds"`
+	RetryAttempts         int    `yaml:"retry_attempts"`
+	RetryBaseDelayMS      int    `yaml:"retry_base_delay_ms"`
+	RetryMaxDelayMS       int    `yaml:"retry_max_delay_ms"`
+	RetryWindowSeconds    int    `yaml:"retry_window_seconds"`
 }
 
 type RelayConfig struct {
@@ -750,11 +754,33 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Queue.WorkerConcurrency > 1000 {
 		cfg.Queue.WorkerConcurrency = 1000
 	}
-	if cfg.Queue.RequestTimeoutSeconds <= 0 {
-		cfg.Queue.RequestTimeoutSeconds = 20
+	if cfg.Queue.RetryAttempts <= 0 {
+		cfg.Queue.RetryAttempts = 3
 	}
-	if cfg.Queue.RequestTimeoutSeconds > 60 {
-		cfg.Queue.RequestTimeoutSeconds = 60
+	if cfg.Queue.RetryAttempts > 6 {
+		cfg.Queue.RetryAttempts = 6
+	}
+	if cfg.Queue.RetryBaseDelayMS <= 0 {
+		cfg.Queue.RetryBaseDelayMS = 1000
+	}
+	if cfg.Queue.RetryMaxDelayMS <= 0 {
+		cfg.Queue.RetryMaxDelayMS = 15000
+	}
+	if cfg.Queue.RetryMaxDelayMS < cfg.Queue.RetryBaseDelayMS {
+		cfg.Queue.RetryMaxDelayMS = cfg.Queue.RetryBaseDelayMS
+	}
+	if cfg.Queue.RetryWindowSeconds <= 0 {
+		cfg.Queue.RetryWindowSeconds = 90
+	}
+	if cfg.Queue.RetryWindowSeconds > 240 {
+		cfg.Queue.RetryWindowSeconds = 240
+	}
+	minimumQueueTimeout := cfg.Queue.RetryWindowSeconds + 30
+	if cfg.Queue.RequestTimeoutSeconds < minimumQueueTimeout {
+		cfg.Queue.RequestTimeoutSeconds = minimumQueueTimeout
+	}
+	if cfg.Queue.RequestTimeoutSeconds > 300 {
+		cfg.Queue.RequestTimeoutSeconds = 300
 	}
 	if cfg.Server.Host == "" {
 		cfg.Server.Host = "0.0.0.0"
@@ -848,6 +874,10 @@ func applyQueueEnvironment(cfg *QueueConfig) {
 	applyRelayEnvInt("EEW_QUEUE_MAX_INFLIGHT_BATCHES", &cfg.MaxInflightBatches)
 	applyRelayEnvInt("EEW_QUEUE_WORKER_CONCURRENCY", &cfg.WorkerConcurrency)
 	applyRelayEnvInt("EEW_QUEUE_REQUEST_TIMEOUT_SECONDS", &cfg.RequestTimeoutSeconds)
+	applyRelayEnvInt("EEW_QUEUE_RETRY_ATTEMPTS", &cfg.RetryAttempts)
+	applyRelayEnvInt("EEW_QUEUE_RETRY_BASE_DELAY_MS", &cfg.RetryBaseDelayMS)
+	applyRelayEnvInt("EEW_QUEUE_RETRY_MAX_DELAY_MS", &cfg.RetryMaxDelayMS)
+	applyRelayEnvInt("EEW_QUEUE_RETRY_WINDOW_SECONDS", &cfg.RetryWindowSeconds)
 }
 
 func applyRelayEnvInt(name string, target *int) {
@@ -5975,6 +6005,11 @@ func retryableBarkError(err error) bool {
 	}
 	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
+		if statusErr.StatusCode == http.StatusBadRequest {
+			body := strings.ToLower(statusErr.Body)
+			return strings.Contains(body, "too many connections") ||
+				strings.Contains(body, "device database temporarily unavailable")
+		}
 		return statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
 	}
 	if errors.Is(err, context.Canceled) {

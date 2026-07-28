@@ -46,7 +46,7 @@ services:
     command:
       - --innodb-buffer-pool-size=128M
       - --performance-schema=OFF
-      - --max-connections=40
+      - --max-connections=64
       - --table-open-cache=256
       - --skip-log-bin
     volumes:
@@ -60,6 +60,49 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
+    logging: *logging
+
+  bark-server:
+    image: bark-server:eew-v2.3.5.1
+    build:
+      context: ../bark-server-patch
+    container_name: bark-server
+    restart: unless-stopped
+    init: true
+    command:
+      - --addr
+      - 0.0.0.0:8080
+      - --dsn
+      - bark:${MYSQL_PASSWORD}@tcp(bark-mysql:3306)/bark
+      - --max-apns-client-count
+      - "16"
+    environment:
+      TZ: Asia/Shanghai
+      BARK_SERVER_MYSQL_MAX_OPEN_CONNS: "24"
+      BARK_SERVER_MYSQL_MAX_IDLE_CONNS: "12"
+      BARK_SERVER_MYSQL_CONN_MAX_IDLE_TIME: 5m
+      BARK_SERVER_MYSQL_CONN_MAX_LIFETIME: 30m
+      BARK_SERVER_MYSQL_QUERY_TIMEOUT: 5s
+      BARK_SERVER_DEVICE_CACHE_TTL: 10m
+      BARK_SERVER_MAX_INFLIGHT_PUSHES: "256"
+    ports:
+      - "127.0.0.1:30011:8080"
+    networks: [eew]
+    read_only: true
+    tmpfs:
+      - "/tmp:size=16m,mode=1777,noexec,nosuid,nodev"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    pids_limit: 384
+    oom_score_adj: -400
+    depends_on:
+      mysql: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     logging: *logging
 
   nats:
@@ -103,6 +146,7 @@ services:
     depends_on:
       nats: {condition: service_healthy}
       mysql: {condition: service_healthy}
+      bark-server: {condition: service_healthy}
     logging: *logging
 
   push-worker-b:

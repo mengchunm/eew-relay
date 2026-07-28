@@ -964,6 +964,12 @@ func TestRetryableBarkError(t *testing.T) {
 	if !retryableBarkError(&HTTPStatusError{StatusCode: http.StatusBadGateway, Body: "bad gateway"}) {
 		t.Fatal("5xx should be retryable")
 	}
+	if !retryableBarkError(&HTTPStatusError{StatusCode: http.StatusBadRequest, Body: `{"message":"Error 1040: Too many connections"}`}) {
+		t.Fatal("legacy Bark database saturation response should be retryable")
+	}
+	if !retryableBarkError(&HTTPStatusError{StatusCode: http.StatusBadRequest, Body: "device database temporarily unavailable"}) {
+		t.Fatal("legacy Bark temporary database response should be retryable")
+	}
 	if retryableBarkError(&HTTPStatusError{StatusCode: http.StatusBadRequest, Body: "BadDeviceToken"}) {
 		t.Fatal("400 should not be retryable")
 	}

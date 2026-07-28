@@ -62,6 +62,9 @@ jobs:
       - name: Build production image
         run: docker build --pull --tag eew-bark:ci .
 
+      - name: Build hardened Bark image
+        run: docker build --pull --tag bark-server:eew-ci bark-server-patch
+
       - name: Build production binary
         env:
           CGO_ENABLED: "0"

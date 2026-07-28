@@ -210,7 +210,7 @@ P/S 波到达时间使用快速混合模型：
 
 1. `critical` 优先，其次 `active`，最后 `passive`。
 2. 同级别内优先推送 S 波 ETA 更短、预计烈度更高、距离更近的订阅地。
-3. 按 Bark 服务器分组并发推送：官方 `api.day.app` 默认 `300` 并发；自建目标进入 NATS JetStream，由多个 worker 分批并发发送。每个进程的自建直发并发硬上限为 `1000`，总吞吐通过增加 worker 横向扩展。
+3. 按 Bark 服务器分组并发推送：官方 `api.day.app` 默认 `300` 并发；自建目标进入 NATS JetStream，由多个 worker 分批并发发送。worker 负责计算并发，Bark 侧通过全局 APNs 在途上限、有界 MySQL 池和 Token 缓存提供最终背压，避免增加 worker 时击穿设备库。
 
 建议配置：
 
@@ -232,9 +232,11 @@ Bark 官方服务器正常使用没有固定次数限制，但异常使用会触
 - 官方错误预算：5 分钟内官方 Bark 错误响应接近阈值时，临时停止后续官方 Bark 请求，避免触发 Ban。
 - 官方单 Key 熔断：某个官方 Bark Key 连续返回 400/404 后，暂停该 Key 24 小时，避免失效 Key 在多次地震中反复消耗错误预算。
 
-自建 Bark Server 不套用官方错误预算和官方 BAN 规则，默认使用更高并发以降低大规模 fanout 延迟。临时错误会有限重试：网络错误、429 和 5xx 默认额外重试 1 次；400、404、BadDeviceToken 等永久错误不重试。实际速度仍取决于自建 Bark Server、APNs 和网络情况；高烈度订阅会优先进入各自服务器分组的并发队列。
+自建 Bark Server 不套用官方错误预算和官方 BAN 规则。网络错误、429、5xx，以及旧版 Bark 错误返回中明确的临时数据库饱和会被识别为临时错误。queue worker 会在 JetStream 消息保持未 ACK 的状态下逐目标抖动退避重试；404、BadDeviceToken 等永久错误不重试。实际速度仍取决于自建 Bark Server、APNs 和网络情况；高烈度订阅会优先进入各自服务器分组的并发队列。
 
-扩展架构支持四部分：PostgreSQL 保存订阅并通过 `earthdistance` GiST 索引筛选震中附近候选地址；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。任务 ACK 只在 worker 返回批次结果后提交，通知 ID 由事件确定性生成，用于降低重试造成重复通知的概率。
+扩展架构支持四部分：PostgreSQL 保存订阅并通过 `earthdistance` GiST 索引筛选震中附近候选地址；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。任务 ACK 只在 worker 完成逐目标临时错误重试并返回最终批次结果后提交，通知 ID 由事件确定性生成，用于降低重投造成重复通知的概率。
+
+仓库内的 `bark-server-patch/` 从固定的 Bark v2.3.5 commit 构建加固镜像。它增加有界 MySQL 连接池、设备 Token 读穿缓存、正确的 404/503 错误分类和进程级 APNs 在途上限。`ops/docker-compose.scale.yml` 已集成该镜像；连接池和缓存参数见 [bark-server-patch/README.md](bark-server-patch/README.md)。
 
 部署者应根据实际 CPU、内存、网络和 Bark/APNs 投递能力设置 `subscription_limit`，并在提高容量前使用仓库内的 mock Bark 工具完成同规格压测。压测只覆盖应用到 mock Bark 的发送边界，不代表 APNs 最终到达时间保证。
 

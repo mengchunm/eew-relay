@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"log"
 	"strings"
 	"sync"
@@ -318,7 +319,7 @@ func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) e
 			return
 		}
 		started := time.Now()
-		response := processQueuedFanout(ctx, notifier, payload, sem)
+		response := processQueuedFanout(ctx, notifier, payload, sem, cfg.Queue)
 		log.Printf("push queue batch processed id=%s targets=%d duration=%s", payload.ID, len(payload.Targets), time.Since(started))
 		data, err := json.Marshal(response)
 		if err != nil {
@@ -331,42 +332,107 @@ func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) e
 		}
 		_ = msg.AckSync()
 	}
+	ackWait := time.Duration(cfg.Queue.RetryWindowSeconds+30) * time.Second
+	if ackWait < 2*time.Minute {
+		ackWait = 2 * time.Minute
+	}
 	_, err = js.QueueSubscribe(cfg.Queue.Subject, cfg.Queue.Durable, handler,
 		nats.Durable(cfg.Queue.Durable), nats.BindStream(cfg.Queue.Stream), nats.ManualAck(),
-		nats.AckExplicit(), nats.AckWait(2*time.Minute), nats.MaxAckPending(64))
+		nats.AckExplicit(), nats.AckWait(ackWait), nats.MaxAckPending(64))
 	if err != nil {
 		return err
 	}
-	log.Printf("push queue worker subject=%s durable=%s concurrency=%d", cfg.Queue.Subject, cfg.Queue.Durable, cfg.Queue.WorkerConcurrency)
+	log.Printf("push queue worker subject=%s durable=%s concurrency=%d retry_attempts=%d retry_window=%ds",
+		cfg.Queue.Subject, cfg.Queue.Durable, cfg.Queue.WorkerConcurrency, cfg.Queue.RetryAttempts, cfg.Queue.RetryWindowSeconds)
 	<-ctx.Done()
 	_ = nc.Drain()
 	return nil
 }
 
-func processQueuedFanout(ctx context.Context, notifier *Notifier, payload relayFanoutRequest, sem chan struct{}) relayFanoutResponse {
+func processQueuedFanout(ctx context.Context, notifier *Notifier, payload relayFanoutRequest, sem chan struct{}, cfg QueueConfig) relayFanoutResponse {
 	response := relayFanoutResponse{ID: payload.ID, Results: make([]relayItemResult, len(payload.Targets))}
 	var wg sync.WaitGroup
 	for index := range payload.Targets {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				response.Results[index] = relayItemResult{Index: index, Error: ctx.Err().Error()}
-				return
-			}
 			target := payload.Targets[index]
-			started := time.Now()
-			retries, err := notifier.SendWithRetry(ctx, target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
-			item := relayItemResult{Index: index, Pushed: err == nil, Retries: retries, ElapsedMS: time.Since(started).Milliseconds()}
-			if err != nil {
-				item.Error = err.Error()
-			}
-			response.Results[index] = item
+			response.Results[index] = sendQueuedTargetWithRetry(ctx, notifier, target, index, sem, cfg)
 		}(index)
 	}
 	wg.Wait()
 	return response
+}
+
+func sendQueuedTargetWithRetry(ctx context.Context, notifier *Notifier, target relayPushTarget, index int, sem chan struct{}, cfg QueueConfig) relayItemResult {
+	started := time.Now()
+	deadline := started.Add(time.Duration(cfg.RetryWindowSeconds) * time.Second)
+	totalRetries := 0
+	durableRetries := 0
+	var lastErr error
+	for {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			return relayItemResult{Index: index, Error: lastErr.Error(), Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds()}
+		}
+		if durableRetries > 0 {
+			totalRetries++
+		}
+		retries, err := notifier.SendWithRetry(ctx, target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
+		<-sem
+		totalRetries += retries
+		if err == nil {
+			return relayItemResult{Index: index, Pushed: true, Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds()}
+		}
+		lastErr = err
+		if !retryableBarkError(err) || durableRetries >= cfg.RetryAttempts {
+			break
+		}
+		durableRetries++
+		delay := queuedRetryDelay(cfg, durableRetries, target.Key)
+		if !deadline.After(time.Now().Add(delay)) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			break
+		case <-time.After(delay):
+			continue
+		}
+		break
+	}
+	item := relayItemResult{Index: index, Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds()}
+	if lastErr != nil {
+		item.Error = lastErr.Error()
+	}
+	return item
+}
+
+func queuedRetryDelay(cfg QueueConfig, attempt int, key string) time.Duration {
+	base := time.Duration(cfg.RetryBaseDelayMS) * time.Millisecond
+	maximum := time.Duration(cfg.RetryMaxDelayMS) * time.Millisecond
+	if base <= 0 {
+		base = time.Second
+	}
+	if maximum < base {
+		maximum = base
+	}
+	delay := base
+	for i := 1; i < attempt && delay < maximum; i++ {
+		delay *= 2
+		if delay > maximum {
+			delay = maximum
+		}
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(key))
+	_, _ = hash.Write([]byte{byte(attempt)})
+	jitterRange := delay / 4
+	if jitterRange <= 0 {
+		return delay
+	}
+	return delay + time.Duration(hash.Sum32()%uint32(jitterRange))
 }

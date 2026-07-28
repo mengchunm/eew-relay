@@ -77,6 +77,8 @@ docker compose -f docker-compose.yml -f docker-compose.self-hosted.yml up -d
 
 如果使用 Bark MySQL 设备库，设置 `EEW_BARK_DEVICE_DSN`，不要同时给应用写权限。
 
+大规模自建 Bark fanout 建议使用仓库内 `bark-server-patch/` 构建的加固镜像；`ops/docker-compose.scale.yml` 已包含完整示例。该镜像固定 Bark v2.3.5 上游 commit，并为 MySQL 查询提供连接池背压和 Token 缓存。不要仅通过无限提高 MySQL `max_connections` 承接突发请求。
+
 ## HTTPS 与反向代理
 
 应用默认只监听宿主机 `127.0.0.1:30010`。使用 Caddy、Nginx 或 Cloudflare Tunnel 提供 HTTPS，不要直接暴露数据库、NATS、Bark 数据库或管理端口。

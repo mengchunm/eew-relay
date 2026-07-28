@@ -135,4 +135,12 @@ queue:
   batch_size: 500
   max_inflight_batches: 8
   worker_concurrency: 400
-  request_timeout_seconds: 20
+  # The worker keeps the durable NATS message unacknowledged while retrying
+  # individual transient failures. Delays include deterministic jitter to avoid
+  # a retry stampede. The request timeout is automatically kept at least 30s
+  # above the retry window.
+  retry_attempts: 3
+  retry_base_delay_ms: 1000
+  retry_max_delay_ms: 15000
+  retry_window_seconds: 90
+  request_timeout_seconds: 120

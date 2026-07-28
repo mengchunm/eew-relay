@@ -1,0 +1,201 @@
+diff --git a/apns/apns.go b/apns/apns.go
+index 6d845b4..73fef42 100644
+--- a/apns/apns.go
++++ b/apns/apns.go
+@@ -5,7 +5,9 @@ import (
+ 	"crypto/x509"
+ 	"fmt"
+ 	"net/http"
++	"os"
+ 	"runtime"
++	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -46,6 +48,7 @@ const (
+ )
+ 
+ var clients = make(chan *apns2.Client, 1)
++var inflightPushes = make(chan struct{}, positiveEnvInt("BARK_SERVER_MAX_INFLIGHT_PUSHES", 256))
+ 
+ // Initialize APNS client pool
+ func init() {
+@@ -128,6 +131,8 @@ func Push(msg *PushMessage) (code int, err error) {
+ 		// Change all parameter names to lowercase to prevent inconsistent capitalization
+ 		pl.Custom(strings.ToLower(k), fmt.Sprintf("%v", v))
+ 	}
++	inflightPushes <- struct{}{}
++	defer func() { <-inflightPushes }()
+ 
+ 	client := <-clients // grab a client from the pool
+ 	clients <- client   // add the client back to the pool
+@@ -144,7 +149,15 @@ func Push(msg *PushMessage) (code int, err error) {
+ 		return 500, err
+ 	}
+ 	if resp.StatusCode != 200 {
+-		return resp.StatusCode, fmt.Errorf(resp.Reason)
++		return resp.StatusCode, fmt.Errorf("%s", resp.Reason)
+ 	}
+ 	return 200, nil
+ }
++
++func positiveEnvInt(name string, fallback int) int {
++	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
++	if err != nil || value <= 0 {
++		return fallback
++	}
++	return value
++}
+diff --git a/database/mysql.go b/database/mysql.go
+index e51c1b1..ae3b355 100644
+--- a/database/mysql.go
++++ b/database/mysql.go
+@@ -1,11 +1,15 @@
+ package database
+ 
+ import (
++	"context"
+ 	"crypto/tls"
+ 	"crypto/x509"
+ 	"database/sql"
+ 	"os"
++	"strconv"
+ 	"strings"
++	"sync"
++	"time"
+ 
+ 	"github.com/go-sql-driver/mysql"
+ 	_ "github.com/go-sql-driver/mysql"
+@@ -14,6 +18,14 @@ import (
+ )
+ 
+ type MySQL struct {
++	tokens       sync.Map
++	cacheTTL     time.Duration
++	queryTimeout time.Duration
++}
++
++type cachedToken struct {
++	token     string
++	expiresAt time.Time
+ }
+ 
+ var mysqlDB *sql.DB
+@@ -34,6 +46,16 @@ func NewMySQL(dsn string) Database {
+ 	if err != nil {
+ 		logger.Fatalf("failed to open database connection (%s): %v", dsn, err)
+ 	}
++	maxOpen := positiveEnvInt("BARK_SERVER_MYSQL_MAX_OPEN_CONNS", 24)
++	maxIdle := positiveEnvInt("BARK_SERVER_MYSQL_MAX_IDLE_CONNS", 12)
++	if maxIdle > maxOpen {
++		maxIdle = maxOpen
++	}
++	db.SetMaxOpenConns(maxOpen)
++	db.SetMaxIdleConns(maxIdle)
++	db.SetConnMaxIdleTime(positiveEnvDuration("BARK_SERVER_MYSQL_CONN_MAX_IDLE_TIME", 5*time.Minute))
++	db.SetConnMaxLifetime(positiveEnvDuration("BARK_SERVER_MYSQL_CONN_MAX_LIFETIME", 30*time.Minute))
++	logger.Infof("MySQL pool configured: max_open=%d max_idle=%d", maxOpen, maxIdle)
+ 
+ 	_, err = db.Exec(dbSchema)
+ 	if err != nil {
+@@ -41,7 +63,10 @@ func NewMySQL(dsn string) Database {
+ 	}
+ 
+ 	mysqlDB = db
+-	return &MySQL{}
++	return &MySQL{
++		cacheTTL:     positiveEnvDuration("BARK_SERVER_DEVICE_CACHE_TTL", 10*time.Minute),
++		queryTimeout: positiveEnvDuration("BARK_SERVER_MYSQL_QUERY_TIMEOUT", 5*time.Second),
++	}
+ }
+ 
+ func NewMySQLWithTLS(dsn, tlsName, caPath, certPath, keyPath string, isSkipVerify bool) Database {
+@@ -102,12 +127,22 @@ func (d *MySQL) CountAll() (int, error) {
+ }
+ 
+ func (d *MySQL) DeviceTokenByKey(key string) (string, error) {
++	if value, ok := d.tokens.Load(key); ok {
++		entry := value.(cachedToken)
++		if time.Now().Before(entry.expiresAt) {
++			return entry.token, nil
++		}
++		d.tokens.Delete(key)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), d.queryTimeout)
++	defer cancel()
+ 	var token string
+-	err := mysqlDB.QueryRow("SELECT `token` FROM `devices` WHERE `key`=? ", key).Scan(&token)
++	err := mysqlDB.QueryRowContext(ctx, "SELECT `token` FROM `devices` WHERE `key`=? ", key).Scan(&token)
+ 	if err != nil {
+ 		return "", err
+ 	}
+ 
++	d.tokens.Store(key, cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)})
+ 	return token, nil
+ }
+ 
+@@ -122,14 +157,39 @@ func (d *MySQL) SaveDeviceTokenByKey(key, token string) (string, error) {
+ 		return "", err
+ 	}
+ 
++	d.tokens.Store(key, cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)})
+ 	return key, nil
+ }
+ 
+ func (d *MySQL) DeleteDeviceByKey(key string) error {
+ 	_, err := mysqlDB.Exec("DELETE FROM `devices` WHERE `key`=?", key)
++	if err == nil {
++		d.tokens.Delete(key)
++	}
+ 	return err
+ }
+ 
++func positiveEnvInt(name string, fallback int) int {
++	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
++	if err != nil || value <= 0 {
++		return fallback
++	}
++	return value
++}
++
++func positiveEnvDuration(name string, fallback time.Duration) time.Duration {
++	raw := strings.TrimSpace(os.Getenv(name))
++	if raw == "" {
++		return fallback
++	}
++	value, err := time.ParseDuration(raw)
++	if err != nil || value <= 0 {
++		logger.Warnf("invalid %s=%q; using %s", name, raw, fallback)
++		return fallback
++	}
++	return value
++}
++
+ func (d *MySQL) Close() error {
+ 	return mysqlDB.Close()
+ }
+diff --git a/route_push.go b/route_push.go
+index 8da18f4..0398cb4 100644
+--- a/route_push.go
++++ b/route_push.go
+@@ -1,6 +1,8 @@
+ package main
+ 
+ import (
++	"database/sql"
++	"errors"
+ 	"fmt"
+ 	"net/url"
+ 	"strings"
+@@ -258,7 +260,10 @@ func push(params map[string]interface{}) (int, error) {
+ 
+ 	deviceToken, err := db.DeviceTokenByKey(msg.DeviceKey)
+ 	if err != nil {
+-		return 400, fmt.Errorf("failed to get device token: %v", err)
++		if errors.Is(err, sql.ErrNoRows) {
++			return 404, fmt.Errorf("device key not found")
++		}
++		return 503, fmt.Errorf("device database temporarily unavailable: %v", err)
+ 	}
+ 
+ 	msg.DeviceToken = deviceToken
