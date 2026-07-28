@@ -112,7 +112,8 @@ $manifest = [ordered]@{
     target = "linux/amd64"
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
 }
-$manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputRoot "manifest.json") -Encoding utf8NoBOM
+$manifestJson = $manifest | ConvertTo-Json
+[IO.File]::WriteAllText((Join-Path $OutputRoot "manifest.json"), ($manifestJson + "`n"), $utf8NoBOM)
 
 Write-Output "Bark 发布包已在本机生成：$OutputRoot"
 Write-Output "上游提交：$upstreamCommit"
