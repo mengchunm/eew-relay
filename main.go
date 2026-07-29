@@ -1660,8 +1660,16 @@ func redactSensitivePath(pathValue string) string {
 }
 
 func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) http.Handler {
+	return newHTTPHandlerWithContext(nil, cfg, store, alertCache, notifier, health)
+}
+
+func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) http.Handler {
 	mux := http.NewServeMux()
-	registerAdminRoutes(mux, cfg, store, alertCache, notifier, health)
+	serviceMonitor := newAdminServiceMonitor(cfg, store, notifier, health)
+	if ctx != nil {
+		serviceMonitor.Start(ctx)
+	}
+	registerAdminRoutes(mux, cfg, store, alertCache, notifier, health, serviceMonitor)
 	tileCacheRoot := filepath.Join(filepath.Dir(strings.TrimSpace(cfg.Server.DataPath)), "map-tiles")
 	if strings.TrimSpace(cfg.Server.DataPath) == "" {
 		tileCacheRoot = filepath.Join(os.TempDir(), "eew-map-tiles")
@@ -2219,7 +2227,7 @@ func serveHTTP(ctx context.Context, cfg Config, store *Store, alertCache *AlertC
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           newHTTPHandler(cfg, store, alertCache, notifier, health),
+		Handler:           newHTTPHandlerWithContext(ctx, cfg, store, alertCache, notifier, health),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      2 * time.Minute,

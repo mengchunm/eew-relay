@@ -63,6 +63,11 @@ func TestAdminLoginUsesSignedHTTPOnlySession(t *testing.T) {
 	if unauthorizedServices.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized services status=%d body=%s", unauthorizedServices.Code, unauthorizedServices.Body.String())
 	}
+	unauthorizedHistory := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedHistory, httptest.NewRequest(http.MethodGet, "/api/admin/services/history", nil))
+	if unauthorizedHistory.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized service history status=%d body=%s", unauthorizedHistory.Code, unauthorizedHistory.Body.String())
+	}
 
 	badBody := []byte(`{"username":"saevio","password":"wrong"}`)
 	bad := httptest.NewRecorder()
@@ -117,8 +122,11 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`/api/admin/subscriptions/liveness`,
 		`id="audit-report-list"`,
 		`data-view="services"`,
-		`id="service-refresh-interval"`,
+		`id="service-history-range"`,
+		`id="service-history-chart"`,
 		`/api/admin/services`,
+		`/api/admin/services/history`,
+		`最近 30 天`,
 		`不发送任何通知`,
 	} {
 		if !strings.Contains(body, required) {
@@ -511,6 +519,21 @@ func TestAdminServiceMonitorUsesReadOnlyHealthProbes(t *testing.T) {
 	}
 	if strings.Contains(recorderJSON(second), "notification_sent\":true") {
 		t.Fatal("read-only service monitor reported a notification send")
+	}
+	historyRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(historyRecorder, adminRequest(http.MethodGet, "/api/admin/services/history?hours=168", nil, cfg))
+	if historyRecorder.Code != http.StatusOK || historyRecorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("service history status=%d cache=%q body=%s", historyRecorder.Code, historyRecorder.Header().Get("Cache-Control"), historyRecorder.Body.String())
+	}
+	var historyResponse struct {
+		Success bool                        `json:"success"`
+		Data    adminServiceHistoryResponse `json:"data"`
+	}
+	if err := json.Unmarshal(historyRecorder.Body.Bytes(), &historyResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !historyResponse.Success || historyResponse.Data.RangeHours != 168 || historyResponse.Data.BucketMinutes != 10 || len(historyResponse.Data.Points) != 1 {
+		t.Fatalf("unexpected service history: %s", historyRecorder.Body.String())
 	}
 }
 

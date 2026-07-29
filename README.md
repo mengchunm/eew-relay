@@ -22,7 +22,7 @@
 - 新用户首次验证成功后直接保存为正式订阅
 - 用户管理页面：`/manage`，Bark Key 只放在 URL fragment 或请求头中
 - 用户管理 API：`GET /api/subscription`、`DELETE /api/unsubscribe`
-- 管理员后台：`/admin`，支持订阅管理、批量新增、通知审计、单用户测试和系统自检
+- 管理员后台：`/admin`，支持订阅管理、通知审计、健康历史时间轴、单用户测试和系统自检
 - 统计 API：`GET /api/stats`
 - 健康检查：`GET /health`
 - 数据源：`wss://ws-api.wolfx.jp/all_eew`
@@ -156,7 +156,7 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 - 对选中订阅或当前筛选结果只读测活，比对自建 Bark 设备库且不触发 Bark/APNs 消息；
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
-- 在独立“服务监控”页面自动刷新应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
+- 在独立“服务监控”页面按时间轴查看应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态。服务器每分钟采样一次，历史写入数据目录下的 `service-health.jsonl`，保留 30 天并支持最近 24 小时、7 天和 30 天视图；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
 
 管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
 

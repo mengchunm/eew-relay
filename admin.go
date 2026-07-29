@@ -77,6 +77,7 @@ type adminServiceMonitor struct {
 	store       *Store
 	notifier    *Notifier
 	health      *RuntimeHealth
+	history     *adminServiceHistoryStore
 	httpClient  *http.Client
 	probeMu     sync.Mutex
 	cached      adminServiceHealthSnapshot
@@ -272,9 +273,11 @@ func setAdminSessionCookie(w http.ResponseWriter, r *http.Request, value string,
 	})
 }
 
-func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) {
+func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth, serviceMonitor *adminServiceMonitor) {
 	auth := newAdminAuth(cfg.Server)
-	serviceMonitor := newAdminServiceMonitor(cfg, store, notifier, health)
+	if serviceMonitor == nil {
+		serviceMonitor = newAdminServiceMonitor(cfg, store, notifier, health)
+	}
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, _ *http.Request) {
 		data, err := publicFS.ReadFile("public/admin.html")
 		if err != nil {
@@ -337,6 +340,19 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 	mux.HandleFunc("GET /api/admin/services", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		data := serviceMonitor.Snapshot(r.Context())
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
+	}))
+	mux.HandleFunc("GET /api/admin/services/history", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		hours := 24
+		if value, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("hours"))); err == nil && value >= 1 {
+			hours = min(value, adminServiceHistoryRetentionDays*24)
+		}
+		data, err := serviceMonitor.History(r.Context(), hours)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取服务健康历史失败"})
+			return
+		}
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
 	}))
 	mux.HandleFunc("GET /api/admin/subscriptions", auth.require(func(w http.ResponseWriter, r *http.Request) {
@@ -918,6 +934,7 @@ func newAdminServiceMonitor(cfg Config, store *Store, notifier *Notifier, health
 		store:    store,
 		notifier: notifier,
 		health:   health,
+		history:  newAdminServiceHistoryStore(cfg),
 		httpClient: &http.Client{
 			Timeout: 2500 * time.Millisecond,
 			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
