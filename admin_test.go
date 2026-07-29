@@ -126,6 +126,10 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="liveness-prev"`,
 		`官方未验证`,
 		`id="audit-report-list"`,
+		`class="audit-table"`,
+		`data-audit-sort="status"`,
+		`id="audit-records-prev"`,
+		`id="audit-records-next"`,
 		`data-view="services"`,
 		`id="service-history-range"`,
 		`id="service-history-chart"`,
@@ -322,6 +326,56 @@ func TestAdminAuditAPIReadsSummaryAndMaskedDetails(t *testing.T) {
 	handler.ServeHTTP(detail, adminRequest(http.MethodGet, "/api/admin/audit?id="+auditFileBase(event)+"&q="+sub.BarkID, nil, cfg))
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), maskKey(sub.BarkID)) || strings.Contains(detail.Body.String(), sub.BarkID) {
 		t.Fatalf("audit detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}
+
+func TestAdminAuditDetailSortsAllMatchingRecordsBeforePagination(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, _, _ := adminTestHandler(t, cfg)
+	now := time.Now()
+	event := Event{EventID: "audit-sort", ReportNum: 1, Type: "cenc_eew", OriginTime: now, Magnitude: 5.3}
+	records := []deliveryAuditRecord{
+		{Status: "pushed", BarkMasked: "z***", BarkHash: "hash-z", LocationName: "成都", NotifyLevel: "active", EstimatedIntensity: 2.1, ElapsedMS: 10},
+		{Status: "failed", BarkMasked: "a***", BarkHash: "hash-a", LocationName: "北京", NotifyLevel: "critical", EstimatedIntensity: 4.2, ElapsedMS: 50, Error: "timeout"},
+		{Status: "filtered", BarkMasked: "c***", BarkHash: "hash-c", LocationName: "上海", EstimatedIntensity: 1.2, ElapsedMS: 30, Reason: "notify_band"},
+		{Status: "skipped", BarkMasked: "b***", BarkHash: "hash-b", LocationName: "广州", NotifyLevel: "passive", EstimatedIntensity: 0.8, ElapsedMS: 20, Reason: "queue"},
+		{Status: "pushed", BarkMasked: "d***", BarkHash: "hash-d", LocationName: "武汉", NotifyLevel: "active", EstimatedIntensity: 3.1, ElapsedMS: 40},
+	}
+	if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), len(records), 0, len(records), 0, 1, records); err != nil {
+		t.Fatal(err)
+	}
+
+	type auditPage struct {
+		Records   []deliveryAuditRecord `json:"records"`
+		Total     int                   `json:"total"`
+		Offset    int                   `json:"offset"`
+		Limit     int                   `json:"limit"`
+		SortBy    string                `json:"sort_by"`
+		SortOrder string                `json:"sort_order"`
+	}
+	request := func(query string) auditPage {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/admin/audit?id="+auditFileBase(event)+"&"+query, nil, cfg))
+		var response struct {
+			Data auditPage `json:"data"`
+		}
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &response) != nil {
+			t.Fatalf("audit detail query=%s status=%d body=%s", query, recorder.Code, recorder.Body.String())
+		}
+		return response.Data
+	}
+
+	page := request("sort_by=elapsed_ms&sort_order=desc&offset=1&limit=2")
+	if page.Total != 5 || page.Offset != 1 || page.Limit != 2 || page.SortBy != "elapsed_ms" || page.SortOrder != "desc" || len(page.Records) != 2 || page.Records[0].ElapsedMS != 40 || page.Records[1].ElapsedMS != 30 {
+		t.Fatalf("global elapsed sort was not applied before pagination: %#v", page)
+	}
+	statusPage := request("sort_by=status&sort_order=asc&limit=5")
+	wantStatuses := []string{"failed", "filtered", "skipped", "pushed", "pushed"}
+	for index, want := range wantStatuses {
+		if statusPage.Records[index].Status != want {
+			t.Fatalf("status sort index=%d got=%q want=%q records=%#v", index, statusPage.Records[index].Status, want, statusPage.Records)
+		}
 	}
 }
 

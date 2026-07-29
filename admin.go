@@ -1921,6 +1921,79 @@ func validAuditID(value string) bool {
 	return value != "" && len(value) <= 240 && sanitizeFilePart(value) == value
 }
 
+func normalizeAdminAuditRecordSort(sortBy, sortOrder string) (string, string) {
+	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
+	switch sortBy {
+	case "bark_id", "location", "status", "notify_level", "estimated_intensity", "elapsed_ms", "reason":
+	default:
+		sortBy = "status"
+	}
+	sortOrder = strings.ToLower(strings.TrimSpace(sortOrder))
+	if sortOrder != "desc" {
+		sortOrder = "asc"
+	}
+	return sortBy, sortOrder
+}
+
+func sortAdminAuditRecords(records []deliveryAuditRecord, sortBy, sortOrder string) {
+	sort.SliceStable(records, func(i, j int) bool {
+		comparison := compareAdminAuditRecords(records[i], records[j], sortBy)
+		if comparison == 0 {
+			comparison = strings.Compare(strings.ToLower(records[i].BarkMasked+"|"+records[i].BarkHash), strings.ToLower(records[j].BarkMasked+"|"+records[j].BarkHash))
+		}
+		if sortOrder == "desc" {
+			return comparison > 0
+		}
+		return comparison < 0
+	})
+}
+
+func compareAdminAuditRecords(left, right deliveryAuditRecord, sortBy string) int {
+	compareString := func(a, b string) int {
+		return strings.Compare(strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b)))
+	}
+	compareInt64 := func(a, b int64) int {
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+	}
+	switch sortBy {
+	case "bark_id":
+		return compareString(left.BarkMasked+"|"+left.BarkHash, right.BarkMasked+"|"+right.BarkHash)
+	case "location":
+		return compareString(left.LocationName, right.LocationName)
+	case "notify_level":
+		return compareString(left.NotifyLevel, right.NotifyLevel)
+	case "estimated_intensity":
+		return compareInt64(int64(math.Round(float64(left.EstimatedIntensity)*10)), int64(math.Round(float64(right.EstimatedIntensity)*10)))
+	case "elapsed_ms":
+		return compareInt64(left.ElapsedMS, right.ElapsedMS)
+	case "reason":
+		return compareString(fallback(left.Error, left.Reason), fallback(right.Error, right.Reason))
+	default:
+		return compareInt64(int64(adminAuditStatusRank(left.Status)), int64(adminAuditStatusRank(right.Status)))
+	}
+}
+
+func adminAuditStatusRank(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed":
+		return 0
+	case "filtered":
+		return 1
+	case "skipped":
+		return 2
+	case "pushed":
+		return 3
+	default:
+		return 4
+	}
+}
+
 func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if !validAuditID(id) {
@@ -1961,10 +2034,8 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 		defer gz.Close()
 		reader = gz
 	}
-	offset, limit := parseAdminPage(r, 0, 500)
-	if limit == 0 {
-		limit = 200
-	}
+	offset, limit := parseAdminPage(r, 100, 500)
+	sortBy, sortOrder := normalizeAdminAuditRecordSort(r.URL.Query().Get("sort_by"), r.URL.Query().Get("sort_order"))
 	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
 	rawQuery := strings.TrimSpace(r.URL.Query().Get("q"))
 	query := strings.ToLower(rawQuery)
@@ -1972,8 +2043,7 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 	if validateBarkID(rawQuery) == nil {
 		queryKeyHash = hashKey(rawQuery)
 	}
-	records := make([]deliveryAuditRecord, 0, limit)
-	total := 0
+	matching := make([]deliveryAuditRecord, 0, limit)
 	scanner := bufio.NewScanner(io.LimitReader(reader, 64<<20))
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
 	for scanner.Scan() {
@@ -1987,17 +2057,23 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 		if query != "" && record.BarkHash != queryKeyHash && !strings.Contains(strings.ToLower(record.BarkMasked+" "+record.BarkHash+" "+record.LocationName+" "+record.Error+" "+record.Reason), query) {
 			continue
 		}
-		if total >= offset && len(records) < limit {
-			records = append(records, record)
-		}
-		total++
+		matching = append(matching, record)
 	}
 	if err := scanner.Err(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取投递审计明细失败"})
 		return
 	}
+	sortAdminAuditRecords(matching, sortBy, sortOrder)
+	total := len(matching)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
-		"id": id, "summary": summary, "records": records, "total": total, "offset": offset, "limit": limit,
+		"id": id, "summary": summary, "records": matching[offset:end], "total": total, "offset": offset, "limit": limit, "sort_by": sortBy, "sort_order": sortOrder,
 	}})
 }
 
