@@ -282,7 +282,7 @@ Bark 官方服务器正常使用没有固定次数限制，但异常使用会触
 
 自建 Bark Server 不套用官方错误预算和官方 BAN 规则。网络错误、429、5xx，以及旧版 Bark 错误返回中明确的临时数据库饱和会被识别为临时错误。queue worker 会在 JetStream 消息保持未 ACK 的状态下逐目标抖动退避重试；404、BadDeviceToken 等永久错误不重试。实际速度仍取决于自建 Bark Server、APNs 和网络情况；高烈度订阅会优先进入各自服务器分组的并发队列。
 
-扩展架构支持四部分：PostgreSQL 保存订阅并通过 `earthdistance` GiST 索引筛选震中附近候选地址；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。任务 ACK 只在 worker 完成逐目标临时错误重试并返回最终批次结果后提交，通知 ID 由事件确定性生成，用于降低重投造成重复通知的概率。
+扩展架构支持四部分：PostgreSQL 保存全部订阅和监测地点；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。每场地震都会评估全部订阅，不设置最大通知距离；是否通知仍由订阅地预估烈度和用户通知档位决定。旧配置中的 `alert.max_distance_km` 只为严格配置解析兼容而保留，运行时不再生效。任务 ACK 只在 worker 完成逐目标临时错误重试并返回最终批次结果后提交，通知 ID 由事件确定性生成，用于降低重投造成重复通知的概率。
 
 队列 Worker 每隔 `queue.worker_heartbeat_seconds` 秒向独立的 NATS 核心主题发布一次只包含实例 ID、启动时间、并发数和累计处理量的心跳。管理员服务监控按 `queue.expected_workers` 判断缺失或过期心跳；心跳不进入 JetStream 任务流、不包含 Bark Key，也不会触发推送。项目提供的双 Worker Compose 建议配置：
 

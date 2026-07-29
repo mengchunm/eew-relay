@@ -14,7 +14,6 @@ import (
 type subscriptionStoreBackend interface {
 	Upsert(Subscription) error
 	Delete(string) error
-	CandidateIDs(latitude, longitude, maxDistanceKM float64) ([]string, error)
 	Close() error
 }
 
@@ -95,8 +94,6 @@ func (p *postgresSubscriptionBackend) detectAdministrativeBoundaries(ctx context
 
 func (p *postgresSubscriptionBackend) ensureSchema(ctx context.Context) error {
 	statements := []string{
-		`CREATE EXTENSION IF NOT EXISTS cube`,
-		`CREATE EXTENSION IF NOT EXISTS earthdistance`,
 		`CREATE TABLE IF NOT EXISTS eew_subscriptions (
 			bark_id text PRIMARY KEY,
 			data jsonb NOT NULL,
@@ -110,8 +107,6 @@ func (p *postgresSubscriptionBackend) ensureSchema(ctx context.Context) error {
 			longitude double precision NOT NULL,
 			PRIMARY KEY (bark_id, location_index)
 		)`,
-		`CREATE INDEX IF NOT EXISTS eew_subscription_locations_earth_gist
-			ON eew_subscription_locations USING gist (ll_to_earth(latitude, longitude))`,
 	}
 	for _, statement := range statements {
 		if _, err := p.db.ExecContext(ctx, statement); err != nil {
@@ -212,30 +207,6 @@ func (p *postgresSubscriptionBackend) Delete(barkID string) error {
 	defer cancel()
 	_, err := p.db.ExecContext(ctx, `DELETE FROM eew_subscriptions WHERE bark_id=$1`, barkID)
 	return err
-}
-
-func (p *postgresSubscriptionBackend) CandidateIDs(latitude, longitude, maxDistanceKM float64) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	meters := maxDistanceKM * 1000
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT DISTINCT bark_id
-		FROM eew_subscription_locations
-		WHERE earth_box(ll_to_earth($1, $2), $3) @> ll_to_earth(latitude, longitude)`,
-		latitude, longitude, meters)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	ids := make([]string, 0)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 func (p *postgresSubscriptionBackend) LookupAdministrativeLocation(ctx context.Context, latitude, longitude float64) (GeocodeResult, bool, error) {

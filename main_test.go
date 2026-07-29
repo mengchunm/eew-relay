@@ -690,8 +690,7 @@ func TestCancellationDispatchBypassesEarthquakeFilters(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := Config{
-		Bark:  BarkConfig{Server: server.URL, Group: "test"},
-		Alert: AlertConfig{MaxDistanceKM: 1},
+		Bark: BarkConfig{Server: server.URL, Group: "test"},
 	}
 	sub := Subscription{BarkID: "cancelKey", BarkServer: server.URL, Latitude: 30.5, Longitude: 104.1}
 	pushed, skipped := dispatchOne(context.Background(), cfg, NewNotifier(cfg.Bark), NewAlertCache(time.Hour, 10), Event{Type: "cenc_eew", EventID: "cancel-123", Cancel: true}, sub)
@@ -1226,9 +1225,6 @@ func TestHistoricalZeroIntensityDoesNotEscalate(t *testing.T) {
 	options := pushOptions(Config{Bark: BarkConfig{Level: "critical", Sound: "alarm", Volume: 10, Call: true}}, event, sub, decision)
 	if options.Level != "passive" || options.Call || options.Sound != "" || options.Volume != 0 {
 		t.Fatalf("unmatched test intensity must fail safe to passive, got %#v", options)
-	}
-	if bypassDeliveryFilters(event) {
-		t.Fatal("historical replay must follow real delivery filters")
 	}
 }
 
@@ -2057,7 +2053,7 @@ func TestHTTPAdminSimulationRequiresBearerToken(t *testing.T) {
 	}
 }
 
-func TestHistoricalReplayFollowsRealtimeDistanceFilter(t *testing.T) {
+func TestHistoricalReplayHasNoMaximumDistanceFilter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -2068,13 +2064,14 @@ func TestHistoricalReplayFollowsRealtimeDistanceFilter(t *testing.T) {
 		Alert: AlertConfig{
 			SWaveKMS:      3.5,
 			PWaveKMS:      6.0,
-			MaxDistanceKM: 1000,
+			MaxDistanceKM: 1,
 		},
 	}
 	sub := Subscription{
-		BarkID:    "testKey",
-		Latitude:  30.5774,
-		Longitude: 103.9625,
+		BarkID:      "testKey",
+		Latitude:    30.5774,
+		Longitude:   103.9625,
+		NotifyBands: []NotificationBand{{Min: 0, Max: notificationOpenEndedMax, Level: "active"}},
 	}
 	normalizeSubscription(&sub)
 
@@ -2091,13 +2088,54 @@ func TestHistoricalReplayFollowsRealtimeDistanceFilter(t *testing.T) {
 		MaxIntensity: "XI",
 	})
 	decision := evaluate(cfg, sub, event)
-	if decision.DistanceKM <= cfg.Alert.MaxDistanceKM {
-		t.Fatalf("test setup should exceed distance filter: %#v", decision)
+	if decision.DistanceKM <= 1000 {
+		t.Fatalf("test setup should exceed the removed legacy distance limit: %#v", decision)
 	}
 
 	pushed, skipped := dispatchOne(context.Background(), cfg, NewNotifier(cfg.Bark), NewAlertCache(time.Hour, 1000), event, sub)
-	if pushed != 0 || skipped != 1 {
-		t.Fatalf("historical replay should follow realtime filters, pushed=%d skipped=%d", pushed, skipped)
+	if pushed != 1 || skipped != 0 {
+		t.Fatalf("historical replay was still distance-limited, pushed=%d skipped=%d", pushed, skipped)
+	}
+}
+
+func TestRealtimeDispatchEvaluatesSubscriptionsBeyondFormerDistanceLimit(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
+	}))
+	defer server.Close()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := Subscription{
+		BarkID: "farRealtimeKey", BarkServer: server.URL,
+		Latitude: 30.5774, Longitude: 103.9625,
+		NotifyBands: []NotificationBand{{Min: 0, Max: notificationOpenEndedMax, Level: "active"}},
+	}
+	if err := store.Upsert(sub); err != nil {
+		t.Fatal(err)
+	}
+	event := Event{
+		Type: "cenc_eew", EventID: "far-realtime", ReportNum: 1,
+		OriginTime: time.Now(), Hypocenter: "河北唐山",
+		Latitude: 39.57, Longitude: 117.98, Magnitude: 7.8, DepthKM: 15,
+	}
+	stored, _ := store.Get(sub.BarkID)
+	if decision := evaluate(Config{}, stored, event); decision.DistanceKM <= 1000 {
+		t.Fatalf("test setup should exceed the removed legacy distance limit: %#v", decision)
+	}
+	cfg := Config{
+		Bark:   BarkConfig{Server: server.URL, Group: "test", RequestTimeoutSeconds: 2},
+		Server: ServerConfig{AuditPath: filepath.Join(t.TempDir(), "audit")},
+		Alert:  AlertConfig{SWaveKMS: 3.5, PWaveKMS: 6, SendRetryAttempts: 1, SendRetryDelayMS: 1},
+	}
+	pushed, skipped, failed := dispatchEvent(context.Background(), cfg, NewNotifier(cfg.Bark, cfg.Alert), store, NewAlertCache(time.Hour, 10), event, time.Now())
+	if pushed != 1 || skipped != 0 || failed != 0 || requests.Load() != 1 {
+		t.Fatalf("far realtime subscription was not evaluated: pushed=%d skipped=%d failed=%d requests=%d", pushed, skipped, failed, requests.Load())
 	}
 }
 
@@ -2464,7 +2502,7 @@ func TestHandlePayloadSendsOneCrossSourceAlertAndOneMaterialRevision(t *testing.
 		Server: ServerConfig{AuditPath: filepath.Join(t.TempDir(), "audit")},
 		Alert: AlertConfig{
 			PushUpdates: true, SWaveKMS: 3.5, PWaveKMS: 6,
-			StaleOriginSecond: 600, MaxDistanceKM: 1000,
+			StaleOriginSecond: 600,
 			SendRetryAttempts: 1, SendRetryDelayMS: 1,
 		},
 	}
@@ -2568,10 +2606,7 @@ type testAdministrativeBoundaryBackend struct {
 
 func (b *testAdministrativeBoundaryBackend) Upsert(Subscription) error { return nil }
 func (b *testAdministrativeBoundaryBackend) Delete(string) error       { return nil }
-func (b *testAdministrativeBoundaryBackend) CandidateIDs(float64, float64, float64) ([]string, error) {
-	return nil, nil
-}
-func (b *testAdministrativeBoundaryBackend) Close() error { return nil }
+func (b *testAdministrativeBoundaryBackend) Close() error              { return nil }
 func (b *testAdministrativeBoundaryBackend) LookupAdministrativeLocation(_ context.Context, latitude, longitude float64) (GeocodeResult, bool, error) {
 	result := b.result
 	result.Latitude = latitude

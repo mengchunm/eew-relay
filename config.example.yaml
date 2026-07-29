@@ -93,7 +93,6 @@ alert:
   p_wave_km_s: 6.0
   stale_origin_seconds: 600
   dedup_keep_minutes: 120
-  max_distance_km: 1000
   # Official api.day.app fanout. Keep this conservative because official Bark
   # rejects excessive concurrent TCP connections and bans abnormal error bursts.
   fanout_concurrency: 300

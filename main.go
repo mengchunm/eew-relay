@@ -147,19 +147,21 @@ type AlertConfig struct {
 	PWaveKMS               float64 `yaml:"p_wave_km_s"`
 	StaleOriginSecond      int     `yaml:"stale_origin_seconds"`
 	DedupKeepMinutes       int     `yaml:"dedup_keep_minutes"`
-	MaxDistanceKM          float64 `yaml:"max_distance_km"`
-	DefaultMinIntensity    int     `yaml:"default_min_intensity"`
-	FanoutConcurrency      int     `yaml:"fanout_concurrency"`
-	SelfHostedConcurrency  int     `yaml:"self_hosted_fanout_concurrency"`
-	FanoutErrorBudget      int     `yaml:"fanout_error_budget"`
-	KeyFailureThreshold    int     `yaml:"key_failure_threshold"`
-	KeyQuarantineMinute    int     `yaml:"key_quarantine_minutes"`
-	SendRetryAttempts      int     `yaml:"send_retry_attempts"`
-	SendRetryDelayMS       int     `yaml:"send_retry_delay_ms"`
-	AlertDetailTTLHours    int     `yaml:"alert_detail_ttl_hours"`
-	AlertDetailMaxItems    int     `yaml:"alert_detail_max_items"`
-	ClickURL               string  `yaml:"click_url"`
-	WeChatURL              string  `yaml:"wechat_url"`
+	// MaxDistanceKM is accepted so existing strict YAML configs keep loading.
+	// Notification delivery no longer reads or enforces this legacy value.
+	MaxDistanceKM         float64 `yaml:"max_distance_km"`
+	DefaultMinIntensity   int     `yaml:"default_min_intensity"`
+	FanoutConcurrency     int     `yaml:"fanout_concurrency"`
+	SelfHostedConcurrency int     `yaml:"self_hosted_fanout_concurrency"`
+	FanoutErrorBudget     int     `yaml:"fanout_error_budget"`
+	KeyFailureThreshold   int     `yaml:"key_failure_threshold"`
+	KeyQuarantineMinute   int     `yaml:"key_quarantine_minutes"`
+	SendRetryAttempts     int     `yaml:"send_retry_attempts"`
+	SendRetryDelayMS      int     `yaml:"send_retry_delay_ms"`
+	AlertDetailTTLHours   int     `yaml:"alert_detail_ttl_hours"`
+	AlertDetailMaxItems   int     `yaml:"alert_detail_max_items"`
+	ClickURL              string  `yaml:"click_url"`
+	WeChatURL             string  `yaml:"wechat_url"`
 }
 
 type AlertPage struct {
@@ -707,9 +709,6 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Alert.RevisionOriginSeconds <= 0 {
 		cfg.Alert.RevisionOriginSeconds = 3
 	}
-	if cfg.Alert.MaxDistanceKM <= 0 {
-		cfg.Alert.MaxDistanceKM = 1000
-	}
 	if cfg.Alert.FanoutConcurrency <= 0 {
 		cfg.Alert.FanoutConcurrency = 100
 	}
@@ -1104,26 +1103,6 @@ func (s *Store) List() []Subscription {
 	subs := make([]Subscription, 0, len(s.subscriptions))
 	for _, sub := range s.subscriptions {
 		subs = append(subs, sub)
-	}
-	return subs
-}
-
-func (s *Store) ListCandidates(latitude, longitude, maxDistanceKM float64) []Subscription {
-	if s.backend == nil || maxDistanceKM <= 0 {
-		return s.List()
-	}
-	ids, err := s.backend.CandidateIDs(latitude, longitude, maxDistanceKM)
-	if err != nil {
-		log.Printf("postgres geographic lookup failed; falling back to in-memory scan: %v", err)
-		return s.List()
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	subs := make([]Subscription, 0, len(ids))
-	for _, id := range ids {
-		if sub, ok := s.subscriptions[id]; ok {
-			subs = append(subs, sub)
-		}
 	}
 	return subs
 }
@@ -1927,10 +1906,6 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 		}
 		event := historicalEvent(record)
 		selectedSub, decision := nearestSubscriptionForEvent(cfg, sub, event)
-		if cfg.Alert.MaxDistanceKM > 0 && decision.DistanceKM > cfg.Alert.MaxDistanceKM {
-			writeJSON(w, http.StatusUnprocessableEntity, APIResponse{Success: false, Message: "该历史地震超出当前最大通知距离，按真实规则不会触发预警", Data: map[string]any{"event_id": event.EventID, "distance_km": round1(decision.DistanceKM)}})
-			return
-		}
 		if notifyLevelForEvent(event, selectedSub, decision) == "" {
 			writeJSON(w, http.StatusUnprocessableEntity, APIResponse{Success: false, Message: "该历史地震的订阅地预估烈度未命中当前通知规则，按真实规则不会触发预警", Data: map[string]any{"event_id": event.EventID, "estimated_intensity": Decimal1(decision.EstimatedIntensity)}})
 			return
@@ -4205,7 +4180,7 @@ type deliveryAuditSummary struct {
 }
 
 func dispatchEvent(ctx context.Context, cfg Config, notifier *Notifier, store *Store, alertCache *AlertCache, event Event, receivedAt time.Time) (int, int, int) {
-	subs := store.ListCandidates(event.Latitude, event.Longitude, cfg.Alert.MaxDistanceKM)
+	subs := store.List()
 	if len(subs) == 0 {
 		log.Printf("event id=%s type=%s skipped: no subscribers", event.EventID, event.Type)
 		return 0, 0, 0
@@ -4220,13 +4195,6 @@ func dispatchEvent(ctx context.Context, cfg Config, notifier *Notifier, store *S
 	for _, sub := range subs {
 		selectedSub, decision := nearestSubscriptionForEvent(cfg, sub, event)
 		decision = adjustSimulationDecision(event, selectedSub, decision)
-		if cfg.Alert.MaxDistanceKM > 0 && decision.DistanceKM > cfg.Alert.MaxDistanceKM && !bypassDeliveryFilters(event) {
-			skipped++
-			if auditEnabled {
-				auditRecords = append(auditRecords, deliveryAuditRecordForTarget(cfg, event, selectedSub, decision, receivedAt, startedAt, "filtered", "max_distance", "", 0, 0, nil))
-			}
-			continue
-		}
 		level := notifyLevelForEvent(event, selectedSub, decision)
 		if level == "" {
 			skipped++
@@ -4787,9 +4755,6 @@ func notifyPriority(level string) int {
 func dispatchOne(ctx context.Context, cfg Config, notifier *Notifier, alertCache *AlertCache, event Event, sub Subscription) (int, int) {
 	sub, decision := nearestSubscriptionForEvent(cfg, sub, event)
 	decision = adjustSimulationDecision(event, sub, decision)
-	if cfg.Alert.MaxDistanceKM > 0 && decision.DistanceKM > cfg.Alert.MaxDistanceKM && !bypassDeliveryFilters(event) {
-		return 0, 1
-	}
 	if notifyLevelForEvent(event, sub, decision) == "" {
 		return 0, 1
 	}
@@ -5725,10 +5690,6 @@ func isTestEvent(event Event) bool {
 
 func isHistoryTestEvent(event Event) bool {
 	return strings.Contains(event.Type, "history_simulate")
-}
-
-func bypassDeliveryFilters(event Event) bool {
-	return event.Cancel || isTestEvent(event)
 }
 
 func evaluate(cfg Config, sub Subscription, event Event) Decision {
