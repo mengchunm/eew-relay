@@ -26,6 +26,11 @@ bark:
 server:
   host: "0.0.0.0"
   port: 30010
+  # Optional administrator console at /admin. Prefer the EEW_ADMIN_USERNAME and
+  # EEW_ADMIN_PASSWORD environment variables so credentials are not committed.
+  admin_username: ""
+  admin_password: ""
+  admin_session_hours: 8
   data_path: "./data/subscriptions.json"
   # Optional PostgreSQL source of truth. The JSON file is imported automatically
   # when the database is empty. Prefer EEW_POSTGRES_DSN in production.

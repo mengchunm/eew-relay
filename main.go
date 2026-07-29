@@ -98,6 +98,9 @@ type BarkConfig struct {
 type ServerConfig struct {
 	Host                      string `yaml:"host"`
 	Port                      int    `yaml:"port"`
+	AdminUsername             string `yaml:"admin_username"`
+	AdminPassword             string `yaml:"admin_password"`
+	AdminSessionHours         int    `yaml:"admin_session_hours"`
 	DataPath                  string `yaml:"data_path"`
 	PostgresDSN               string `yaml:"postgres_dsn"`
 	HistoryPath               string `yaml:"history_path"`
@@ -787,6 +790,22 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Server.Port <= 0 {
 		cfg.Server.Port = 30010
+	}
+	if value := strings.TrimSpace(os.Getenv("EEW_ADMIN_USERNAME")); value != "" {
+		cfg.Server.AdminUsername = value
+	}
+	if value, ok := os.LookupEnv("EEW_ADMIN_PASSWORD"); ok && value != "" {
+		cfg.Server.AdminPassword = value
+	}
+	cfg.Server.AdminUsername = strings.TrimSpace(cfg.Server.AdminUsername)
+	if (cfg.Server.AdminUsername == "") != (cfg.Server.AdminPassword == "") {
+		return Config{}, errors.New("server.admin_username and server.admin_password must be configured together")
+	}
+	if cfg.Server.AdminSessionHours <= 0 {
+		cfg.Server.AdminSessionHours = 8
+	}
+	if cfg.Server.AdminSessionHours > 24 {
+		cfg.Server.AdminSessionHours = 24
 	}
 	if cfg.Server.DataPath == "" {
 		cfg.Server.DataPath = "./data/subscriptions.json"
@@ -1524,7 +1543,7 @@ func securityHeaders(next http.Handler) http.Handler {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		w.Header().Set("Content-Security-Policy", csp)
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/manage") || strings.HasPrefix(r.URL.Path, "/alert/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/manage") || strings.HasPrefix(r.URL.Path, "/admin") || strings.HasPrefix(r.URL.Path, "/alert/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)
@@ -1591,6 +1610,7 @@ func redactSensitivePath(pathValue string) string {
 
 func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) http.Handler {
 	mux := http.NewServeMux()
+	registerAdminRoutes(mux, cfg, store, alertCache, notifier, health)
 	tileCacheRoot := filepath.Join(filepath.Dir(strings.TrimSpace(cfg.Server.DataPath)), "map-tiles")
 	if strings.TrimSpace(cfg.Server.DataPath) == "" {
 		tileCacheRoot = filepath.Join(os.TempDir(), "eew-map-tiles")
@@ -4038,6 +4058,9 @@ type deliveryAuditSummary struct {
 	ReportNum             int            `json:"report_num"`
 	Type                  string         `json:"type"`
 	OriginTime            string         `json:"origin_time"`
+	Hypocenter            string         `json:"hypocenter,omitempty"`
+	Magnitude             float64        `json:"magnitude,omitempty"`
+	MaxIntensity          string         `json:"max_intensity,omitempty"`
 	ReceivedAt            string         `json:"received_at"`
 	FanoutStartedAt       string         `json:"fanout_started_at"`
 	FanoutDoneAt          string         `json:"fanout_done_at"`
@@ -4434,6 +4457,9 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 		ReportNum:             event.ReportNum,
 		Type:                  event.Type,
 		OriginTime:            formatBeijing(event.OriginTime, time.RFC3339),
+		Hypocenter:            event.Hypocenter,
+		Magnitude:             event.Magnitude,
+		MaxIntensity:          event.MaxIntensity,
 		ReceivedAt:            formatBeijing(receivedAt, time.RFC3339Nano),
 		FanoutStartedAt:       formatBeijing(startedAt, time.RFC3339Nano),
 		FanoutDoneAt:          formatBeijing(doneAt, time.RFC3339Nano),

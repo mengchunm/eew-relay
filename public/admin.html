@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EEW 管理后台</title>
+  <link rel="icon" href="/eew-favicon.svg" type="image/svg+xml">
+  <style>
+    :root{--bg:#f5f6f8;--panel:#fff;--text:#17191c;--muted:#6c737f;--line:#e2e5ea;--red:#d92d20;--red-soft:#fff1f0;--blue:#155eef;--blue-soft:#eff4ff;--green:#079455;--green-soft:#ecfdf3;--amber:#dc6803;--amber-soft:#fffaeb;--shadow:0 12px 36px rgba(16,24,40,.08);font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--text);background:var(--bg)}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg)}button,input,textarea,select{font:inherit}button{cursor:pointer}.hidden,[hidden]{display:none!important}
+    .login-shell{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 15% 10%,#fff 0,transparent 34%),radial-gradient(circle at 90% 0,#feeceb 0,transparent 34%),var(--bg)}
+    .login-card{width:min(100%,420px);padding:34px;background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}
+    .brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:var(--red);color:#fff;font-weight:800}.brand h1{margin:0;font-size:22px}.brand small{display:block;margin-top:3px;color:var(--muted)}
+    .login-card form{display:grid;gap:16px;margin-top:30px}.field{display:grid;gap:7px}.field label{font-size:13px;font-weight:650;color:#4b5563}.field input,.field textarea,.field select{width:100%;border:1px solid #cfd4dc;border-radius:9px;background:#fff;padding:10px 12px;color:var(--text);outline:none}.field input:focus,.field textarea:focus,.field select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(21,94,239,.12)}.field textarea{min-height:112px;resize:vertical}.hint{color:var(--muted);font-size:12px;line-height:1.55}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:40px;padding:0 14px;border:1px solid transparent;border-radius:8px;font-weight:650}.btn-primary{background:var(--red);color:#fff}.btn-secondary{background:#fff;border-color:#cfd4dc;color:#344054}.btn-danger{background:var(--red-soft);border-color:#fecdca;color:#b42318}.btn-blue{background:var(--blue);color:#fff}.btn-sm{min-height:32px;padding:0 10px;font-size:12px}.btn:disabled{cursor:not-allowed;opacity:.5}.login-error{min-height:20px;color:var(--red);font-size:13px}
+    .app{min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;width:236px;padding:22px 16px;background:#16181c;color:#fff}.sidebar .brand{padding:0 8px 22px;border-bottom:1px solid #30343b}.sidebar .brand small{color:#a9b0bb}.nav{display:grid;gap:6px;margin-top:22px}.nav button{display:flex;align-items:center;gap:10px;width:100%;height:44px;padding:0 13px;border:0;border-radius:8px;background:transparent;color:#b8bec8;text-align:left}.nav button:hover,.nav button.active{background:#292d34;color:#fff}.nav-icon{width:22px;text-align:center}.sidebar-foot{position:absolute;right:16px;bottom:20px;left:16px;border-top:1px solid #30343b;padding-top:16px}.admin-name{margin-bottom:10px;color:#d0d5dd;font-size:13px}
+    .main{margin-left:236px;min-height:100vh}.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;height:72px;padding:0 30px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.92);backdrop-filter:blur(10px)}.topbar h2{margin:0;font-size:20px}.topbar-meta{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:13px}.health-dot{width:9px;height:9px;border-radius:50%;background:#98a2b3}.health-dot.ok{background:var(--green)}.health-dot.bad{background:var(--red)}
+    .content{padding:28px 30px 50px}.view{display:none}.view.active{display:block}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.section-head h3{margin:0 0 5px;font-size:22px}.section-head p{margin:0;color:var(--muted);font-size:14px}.actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.stat{padding:20px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.stat-label{color:var(--muted);font-size:13px}.stat-value{margin-top:8px;font-size:27px;font-weight:750;letter-spacing:-.02em}.stat-note{margin-top:6px;color:var(--muted);font-size:12px}.panel{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 19px;border-bottom:1px solid var(--line)}.panel-head h4{margin:0;font-size:16px}.panel-body{padding:18px}.checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.check{display:flex;align-items:flex-start;gap:11px;padding:14px;border:1px solid var(--line);border-radius:9px}.check-mark{display:grid;place-items:center;flex:0 0 auto;width:24px;height:24px;border-radius:50%;background:var(--green-soft);color:var(--green);font-size:13px;font-weight:800}.check.bad .check-mark{background:var(--red-soft);color:var(--red)}.check strong{font-size:14px}.check p{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.5}.error-text{color:var(--red)!important}
+    .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}.search{flex:1;min-width:220px;height:42px;padding:0 13px;border:1px solid #cfd4dc;border-radius:8px;background:#fff}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:11px;background:#fff}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:middle}th{background:#f9fafb;color:#667085;font-size:12px;font-weight:650}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#fcfcfd}.mono{font-family:"SFMono-Regular",Consolas,monospace}.key-cell{max-width:230px;overflow:hidden;text-overflow:ellipsis}.location-cell{max-width:210px;overflow:hidden;text-overflow:ellipsis}.subtle{color:var(--muted)}.badge{display:inline-flex;align-items:center;min-height:23px;padding:0 8px;border-radius:999px;background:#f2f4f7;color:#475467;font-size:11px}.badge.ok{background:var(--green-soft);color:#067647}.badge.bad{background:var(--red-soft);color:#b42318}.badge.warn{background:var(--amber-soft);color:#b54708}.row-actions{display:flex;gap:6px}.pager{display:flex;align-items:center;justify-content:flex-end;gap:9px;margin-top:14px;color:var(--muted);font-size:13px}.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+    .audit-event{display:grid;gap:2px}.audit-event strong{max-width:260px;overflow:hidden;text-overflow:ellipsis}.metric-good{color:var(--green);font-weight:700}.metric-bad{color:var(--red);font-weight:700}.metric-warn{color:var(--amber);font-weight:700}
+    .test-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr);gap:16px}.test-form{display:grid;gap:16px}.notice{padding:12px 14px;border:1px solid #b2ccff;border-radius:8px;background:var(--blue-soft);color:#1849a9;font-size:13px;line-height:1.6}.danger-notice{border-color:#fecdca;background:var(--red-soft);color:#912018}
+    dialog{width:min(calc(100% - 32px),650px);max-height:90vh;padding:0;border:0;border-radius:14px;background:#fff;box-shadow:0 24px 70px rgba(16,24,40,.25)}dialog::backdrop{background:rgba(15,18,24,.55);backdrop-filter:blur(2px)}.dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 22px;border-bottom:1px solid var(--line)}.dialog-head h3{margin:0;font-size:18px}.dialog-head p{margin:5px 0 0;color:var(--muted);font-size:12px}.icon-btn{width:34px;height:34px;border:0;border-radius:7px;background:#f2f4f7;color:#667085;font-size:20px}.dialog-body{max-height:calc(90vh - 145px);overflow:auto;padding:20px 22px}.dialog-foot{display:flex;justify-content:flex-end;gap:9px;padding:15px 22px;border-top:1px solid var(--line)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.span-2{grid-column:1/-1}.audit-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:16px}.audit-summary div{padding:10px;border-radius:8px;background:#f7f8fa}.audit-summary small{display:block;color:var(--muted)}.audit-summary strong{display:block;margin-top:4px}.detail-filters{display:flex;gap:8px;margin-bottom:12px}.detail-filters input,.detail-filters select{height:38px;border:1px solid #cfd4dc;border-radius:7px;padding:0 10px}.detail-filters input{flex:1}.toast{position:fixed;right:22px;bottom:22px;z-index:100;display:none;width:min(420px,calc(100% - 44px));padding:13px 15px;border:1px solid #abefc6;border-radius:9px;background:var(--green-soft);box-shadow:var(--shadow);color:#067647;font-size:13px}.toast.show{display:block}.toast.error{border-color:#fecdca;background:var(--red-soft);color:#b42318}
+    @media(max-width:1050px){.stats{grid-template-columns:repeat(2,1fr)}.test-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}}
+    @media(max-width:760px){.sidebar{position:static;width:100%;padding:14px}.sidebar .brand{padding-bottom:14px}.nav{grid-template-columns:repeat(4,1fr);margin-top:14px}.nav button{justify-content:center;padding:0;font-size:12px}.nav-icon{display:none}.sidebar-foot{position:static;display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:12px}.admin-name{margin:0}.main{margin:0}.topbar{height:60px;padding:0 16px}.content{padding:20px 14px 40px}.topbar-meta span:not(.health-dot){display:none}.section-head{display:grid}.stats{grid-template-columns:1fr 1fr}.toolbar{align-items:stretch;flex-wrap:wrap}.search{width:100%;flex-basis:100%}.form-grid{grid-template-columns:1fr}.span-2{grid-column:auto}.audit-summary{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+  <section id="login-view" class="login-shell">
+    <div class="login-card">
+      <div class="brand"><div class="brand-mark">震</div><div><h1>EEW 管理后台</h1><small>地震预警订阅与投递管理</small></div></div>
+      <form id="login-form">
+        <div class="field"><label for="login-user">管理员账号</label><input id="login-user" autocomplete="username" required autofocus></div>
+        <div class="field"><label for="login-password">密码</label><input id="login-password" type="password" autocomplete="current-password" required></div>
+        <div id="login-error" class="login-error" role="alert"></div>
+        <button id="login-button" class="btn btn-primary" type="submit">登录管理后台</button>
+      </form>
+    </div>
+  </section>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">震</div><div><h1>EEW</h1><small>管理员控制台</small></div></div>
+      <nav class="nav" aria-label="后台导航">
+        <button class="active" data-view="overview"><span class="nav-icon">◫</span>系统概览</button>
+        <button data-view="subscriptions"><span class="nav-icon">◎</span>订阅管理</button>
+        <button data-view="audits"><span class="nav-icon">≡</span>通知历史</button>
+        <button data-view="tests"><span class="nav-icon">✓</span>系统测试</button>
+      </nav>
+      <div class="sidebar-foot"><div id="admin-name" class="admin-name"></div><button id="logout" class="btn btn-secondary btn-sm">退出登录</button></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><h2 id="page-title">系统概览</h2><div class="topbar-meta"><span id="health-dot" class="health-dot"></span><span id="health-text">正在检查系统</span><button id="refresh-current" class="btn btn-secondary btn-sm">刷新</button></div></header>
+      <div class="content">
+        <section id="view-overview" class="view active">
+          <div class="section-head"><div><h3>系统概览</h3><p>订阅规模、数据源状态与投递组件实时概况。</p></div></div>
+          <div class="stats">
+            <div class="stat"><div class="stat-label">订阅用户</div><div id="stat-subscriptions" class="stat-value">—</div><div id="stat-subscriptions-note" class="stat-note">正在读取</div></div>
+            <div class="stat"><div class="stat-label">地震数据源</div><div id="stat-source" class="stat-value">—</div><div id="stat-source-note" class="stat-note">正在读取</div></div>
+            <div class="stat"><div class="stat-label">通知审计</div><div id="stat-audits" class="stat-value">—</div><div id="stat-audits-note" class="stat-note">正在读取</div></div>
+            <div class="stat"><div class="stat-label">运行时间</div><div id="stat-uptime" class="stat-value">—</div><div id="stat-process-note" class="stat-note">正在读取</div></div>
+          </div>
+          <div class="panel"><div class="panel-head"><h4>组件健康检查</h4><span id="checked-at" class="subtle"></span></div><div class="panel-body"><div id="checks" class="checks"></div></div></div>
+        </section>
+
+        <section id="view-subscriptions" class="view">
+          <div class="section-head"><div><h3>订阅管理</h3><p>查询订阅、批量新增、测试单个用户或删除无效订阅。</p></div><div class="actions"><button id="delete-selected" class="btn btn-danger" disabled>删除所选</button><button id="open-add" class="btn btn-primary">批量新增订阅</button></div></div>
+          <div class="toolbar"><input id="subscription-search" class="search" placeholder="搜索 Bark Key、服务器或地点"><button id="run-search" class="btn btn-secondary">搜索</button><button id="clear-search" class="btn btn-secondary">清除</button></div>
+          <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前页全部"></th><th>Bark Key</th><th>服务器</th><th>监测地点</th><th>通知规则</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="subscriptions-body"></tbody></table><div id="subscriptions-empty" class="empty hidden">没有找到订阅</div></div>
+          <div class="pager"><span id="subscription-page-info"></span><button id="subscription-prev" class="btn btn-secondary btn-sm">上一页</button><button id="subscription-next" class="btn btn-secondary btn-sm">下一页</button></div>
+        </section>
+
+        <section id="view-audits" class="view">
+          <div class="section-head"><div><h3>历史地震通知</h3><p>查看真实地震事件的推送数量、失败情况、耗时与逐用户脱敏明细。</p></div><button id="refresh-audits" class="btn btn-secondary">刷新记录</button></div>
+          <div class="table-wrap"><table><thead><tr><th>事件</th><th>接收时间</th><th>推送</th><th>过滤 / 跳过</th><th>失败</th><th>总耗时</th><th>P90</th><th>操作</th></tr></thead><tbody id="audits-body"></tbody></table><div id="audits-empty" class="empty hidden">当前保留期内没有真实地震投递记录</div></div>
+        </section>
+
+        <section id="view-tests" class="view">
+          <div class="section-head"><div><h3>系统测试</h3><p>先查看组件自检，再向一个已订阅 Bark Key 发送受控测试。</p></div><button id="run-self-check" class="btn btn-secondary">重新运行自检</button></div>
+          <div class="test-grid">
+            <div class="panel" style="margin-top:0"><div class="panel-head"><h4>单用户推送测试</h4></div><div class="panel-body">
+              <form id="test-form" class="test-form">
+                <div class="notice">测试只发送给下方指定的一个已订阅用户，不会触发全量群发，也不会写入真实地震投递审计。</div>
+                <div class="field"><label for="test-key">Bark Key</label><input id="test-key" class="mono" required placeholder="输入或从订阅列表选择"></div>
+                <div class="field"><label for="test-kind">测试类型</label><select id="test-kind"><option value="connectivity">链路连通性（静音通知）</option><option value="small">低烈度模拟</option><option value="medium">中等烈度模拟</option><option value="large">高烈度模拟</option></select></div>
+                <button id="test-submit" class="btn btn-blue" type="submit">发送单用户测试</button>
+              </form>
+            </div></div>
+            <div class="panel" style="margin-top:0"><div class="panel-head"><h4>系统自检结果</h4></div><div class="panel-body"><div id="test-checks" class="checks" style="grid-template-columns:1fr"></div></div></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="add-dialog">
+    <div class="dialog-head"><div><h3>批量新增订阅</h3><p>本次所有 Bark Key 使用同一监测地点和默认三级通知规则。</p></div><button class="icon-btn" data-close="add-dialog" aria-label="关闭">×</button></div>
+    <form id="add-form">
+      <div class="dialog-body"><div class="form-grid">
+        <div class="field span-2"><label for="add-keys">Bark Key（每行一个，最多 100 个）</label><textarea id="add-keys" class="mono" required placeholder="Key_1&#10;Key_2&#10;也支持粘贴完整 Bark URL"></textarea><div class="hint">整批会先完成格式、Bark 设备库和地点校验；任意一项不通过时不会写入。已存在的 Key 不会被覆盖。</div></div>
+        <div class="field span-2"><label for="add-server">Bark 服务器</label><input id="add-server" required placeholder="https://api.day.app"></div>
+        <div class="field span-2"><label for="add-location">监测地点名称</label><input id="add-location" maxlength="80" required placeholder="例如：四川省 成都市 武侯区"></div>
+        <div class="field"><label for="add-latitude">纬度</label><input id="add-latitude" type="number" min="-90" max="90" step="0.000001" required placeholder="30.5728"></div>
+        <div class="field"><label for="add-longitude">经度</label><input id="add-longitude" type="number" min="-180" max="180" step="0.000001" required placeholder="104.0668"></div>
+        <div class="notice span-2">默认提醒：1 度静音通知、2 度普通通知、3 度及以上强行响铃。新增后可从订阅列表打开用户管理页调整地点和规则。</div>
+      </div></div>
+      <div class="dialog-foot"><button type="button" class="btn btn-secondary" data-close="add-dialog">取消</button><button id="add-submit" type="submit" class="btn btn-primary">校验并批量新增</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="audit-dialog">
+    <div class="dialog-head"><div><h3 id="audit-detail-title">投递审计明细</h3><p id="audit-detail-subtitle"></p></div><button class="icon-btn" data-close="audit-dialog" aria-label="关闭">×</button></div>
+    <div class="dialog-body">
+      <div id="audit-summary" class="audit-summary"></div>
+      <div class="detail-filters"><select id="audit-status"><option value="">全部状态</option><option value="pushed">已推送</option><option value="failed">失败</option><option value="filtered">规则过滤</option><option value="skipped">跳过</option></select><input id="audit-search" placeholder="搜索完整 Bark Key、脱敏 Key、地点或错误"><button id="audit-filter" class="btn btn-secondary btn-sm">筛选</button></div>
+      <div class="table-wrap"><table><thead><tr><th>用户</th><th>地点</th><th>状态</th><th>通知</th><th>预估烈度</th><th>耗时</th><th>原因 / 错误</th></tr></thead><tbody id="audit-records-body"></tbody></table><div id="audit-records-empty" class="empty hidden">没有符合筛选条件的投递明细</div></div>
+      <div id="audit-records-info" class="pager"></div>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const $=selector=>document.querySelector(selector);
+    const $$=selector=>Array.from(document.querySelectorAll(selector));
+    const state={view:"overview",overview:null,subOffset:0,subLimit:50,subTotal:0,subQuery:"",selected:new Set(),auditID:""};
+    const titles={overview:"系统概览",subscriptions:"订阅管理",audits:"通知历史",tests:"系统测试"};
+    function escapeHTML(value){return String(value??"").replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));}
+    function formatTime(value){if(!value)return"—";const d=new Date(value);return Number.isNaN(d.getTime())?String(value):d.toLocaleString("zh-CN",{hour12:false});}
+    function formatMillis(ms){if(ms===undefined||ms===null)return"—";return Number(ms)>=1000?(Number(ms)/1000).toFixed(2)+" 秒":Number(ms)+" ms";}
+    function formatUptime(seconds){seconds=Number(seconds||0);const d=Math.floor(seconds/86400),h=Math.floor(seconds%86400/3600),m=Math.floor(seconds%3600/60);return d?`${d}天 ${h}时`:h?`${h}时 ${m}分`:`${m}分钟`;}
+    function formatBytes(bytes){bytes=Number(bytes||0);if(bytes<1024)return bytes+" B";if(bytes<1048576)return(bytes/1024).toFixed(1)+" KB";return(bytes/1048576).toFixed(1)+" MB";}
+    let toastTimer;
+    function toast(message,error=false){const box=$("#toast");box.textContent=message;box.className="toast show"+(error?" error":"");clearTimeout(toastTimer);toastTimer=setTimeout(()=>box.className="toast",4500);}
+    async function api(path,options={}){const headers={Accept:"application/json",...(options.headers||{})};if(options.body&&!headers["Content-Type"])headers["Content-Type"]="application/json";const response=await fetch(path,{...options,headers,credentials:"same-origin"});let json;try{json=await response.json()}catch{json={success:false,message:"服务器返回了无法解析的响应"}}if(response.status===401&&!path.endsWith("/login")){showLogin("登录已失效，请重新登录");throw new Error(json.message||"未登录");}if(!response.ok||!json.success)throw new Error(json.message||`请求失败 (${response.status})`);return json.data;}
+    function setBusy(button,busy,label){if(!button)return;if(busy){button.dataset.label=button.textContent;button.textContent=label||"处理中…";button.disabled=true}else{button.textContent=button.dataset.label||button.textContent;button.disabled=false}}
+    function showLogin(message=""){$("#app").classList.add("hidden");$("#login-view").classList.remove("hidden");$("#login-error").textContent=message;$("#login-password").value="";}
+    function showApp(username){$("#login-view").classList.add("hidden");$("#app").classList.remove("hidden");$("#admin-name").textContent="管理员："+username;switchView("overview");}
+    async function init(){try{const session=await api("/api/admin/session");if(!session.enabled){showLogin("服务器尚未配置管理员账号和密码");$("#login-button").disabled=true;return}if(session.authenticated){showApp(session.username);await Promise.all([loadOverview(),loadAudits()]);}else showLogin();}catch(err){showLogin(err.message)}}
+    $("#login-form").addEventListener("submit",async event=>{event.preventDefault();const button=$("#login-button");setBusy(button,true,"正在登录…");$("#login-error").textContent="";try{const data=await api("/api/admin/login",{method:"POST",body:JSON.stringify({username:$("#login-user").value.trim(),password:$("#login-password").value})});showApp(data.username);await Promise.all([loadOverview(),loadAudits()]);}catch(err){$("#login-error").textContent=err.message}finally{setBusy(button,false)}});
+    $("#logout").addEventListener("click",async()=>{try{await api("/api/admin/logout",{method:"POST"})}catch{}showLogin("已退出登录")});
+    $$(".nav button").forEach(button=>button.addEventListener("click",()=>switchView(button.dataset.view)));
+    function switchView(view){state.view=view;$$(".nav button").forEach(b=>b.classList.toggle("active",b.dataset.view===view));$$(".view").forEach(v=>v.classList.toggle("active",v.id===`view-${view}`));$("#page-title").textContent=titles[view];if(view==="subscriptions"&&!state.subTotal)loadSubscriptions();if(view==="audits")loadAudits();if(view==="tests")loadOverview();}
+    $("#refresh-current").addEventListener("click",()=>{if(state.view==="subscriptions")loadSubscriptions();else if(state.view==="audits")loadAudits();else loadOverview()});
+    async function loadOverview(){try{const data=await api("/api/admin/overview");state.overview=data;renderOverview(data)}catch(err){toast(err.message,true)}}
+    function renderOverview(data){$("#stat-subscriptions").textContent=Number(data.subscriptions||0).toLocaleString();$("#stat-subscriptions-note").textContent=data.subscription_paused?`公开新增已暂停（${data.subscription_pause_reason||"manual"}）`:"公开新增正常";$("#stat-source").textContent=data.data_source_healthy?"正常":"异常";$("#stat-source").style.color=data.data_source_healthy?"var(--green)":"var(--red)";$("#stat-source-note").textContent=data.runtime?.last_message_at?"最近消息 "+formatTime(data.runtime.last_message_at):"尚无消息";$("#stat-audits").textContent=Number(data.audit?.records||0).toLocaleString();$("#stat-audits-note").textContent=`保留 ${data.audit?.retention_days||0} 天`;$("#stat-uptime").textContent=formatUptime(data.uptime_seconds);$("#stat-process-note").textContent=`${data.process?.goroutines||0} 协程 · ${formatBytes(data.process?.memory_alloc_bytes)}`;$("#checked-at").textContent="检查于 "+formatTime(data.checked_at);$("#health-dot").className="health-dot "+(data.data_source_healthy?"ok":"bad");$("#health-text").textContent=data.data_source_healthy?"核心链路正常":"系统存在异常";renderChecks($("#checks"),data.checks||[]);renderChecks($("#test-checks"),data.checks||[]);if(!$("#add-server").value)$("#add-server").value=data.self_hosted_bark_server||data.default_bark_server||"https://api.day.app";}
+    function renderChecks(container,checks){container.innerHTML=checks.map(check=>`<div class="check ${check.healthy?"":"bad"}"><div class="check-mark">${check.healthy?"✓":"!"}</div><div><strong>${escapeHTML(check.name)}</strong><p>${escapeHTML(check.detail||"")}</p>${check.error?`<p class="error-text">${escapeHTML(check.error)}</p>`:""}</div></div>`).join("");}
+    $("#run-self-check").addEventListener("click",loadOverview);
+
+    async function loadSubscriptions(){const body=$("#subscriptions-body");body.innerHTML=`<tr><td colspan="7" class="empty">正在读取订阅…</td></tr>`;try{const params=new URLSearchParams({offset:String(state.subOffset),limit:String(state.subLimit)});if(state.subQuery)params.set("q",state.subQuery);const data=await api("/api/admin/subscriptions?"+params);state.subTotal=data.total;renderSubscriptions(data.items||[])}catch(err){body.innerHTML="";toast(err.message,true)}}
+    function renderSubscriptions(items){const body=$("#subscriptions-body");$("#subscriptions-empty").classList.toggle("hidden",items.length!==0);body.innerHTML=items.map(sub=>{const locations=(sub.locations?.length?sub.locations:[{name:sub.location_name,latitude:sub.latitude,longitude:sub.longitude}]).map(loc=>loc.name||`${Number(loc.latitude).toFixed(4)}, ${Number(loc.longitude).toFixed(4)}`).join("；");const bands=(sub.notify_bands||[]).map(b=>`${b.min}–${b.max===99?"+":b.max}:${({passive:"静音",active:"普通",critical:"响铃"}[b.level]||b.level)}`).join(" ");return `<tr><td><input class="sub-select" type="checkbox" value="${escapeHTML(sub.bark_id)}" ${state.selected.has(sub.bark_id)?"checked":""}></td><td class="mono key-cell" title="${escapeHTML(sub.bark_id)}">${escapeHTML(sub.bark_id)}</td><td><span class="badge">${escapeHTML(String(sub.bark_server||"").replace(/^https?:\/\//,""))}</span></td><td class="location-cell" title="${escapeHTML(locations)}">${escapeHTML(locations)}</td><td class="subtle">${escapeHTML(bands||"默认规则")}</td><td>${formatTime(sub.updated_at)}</td><td><div class="row-actions"><button class="btn btn-secondary btn-sm sub-test" data-key="${escapeHTML(sub.bark_id)}">测试</button><a class="btn btn-secondary btn-sm" href="/manage#key=${encodeURIComponent(sub.bark_id)}" target="_blank" rel="noopener">管理</a><button class="btn btn-danger btn-sm sub-delete" data-key="${escapeHTML(sub.bark_id)}">删除</button></div></td></tr>`}).join("");const start=state.subTotal?state.subOffset+1:0,end=Math.min(state.subOffset+state.subLimit,state.subTotal);$("#subscription-page-info").textContent=`${start}–${end} / ${state.subTotal}`;$("#subscription-prev").disabled=state.subOffset===0;$("#subscription-next").disabled=state.subOffset+state.subLimit>=state.subTotal;$("#select-all").checked=items.length>0&&items.every(s=>state.selected.has(s.bark_id));updateDeleteButton();}
+    $("#subscriptions-body").addEventListener("change",event=>{if(!event.target.classList.contains("sub-select"))return;if(event.target.checked)state.selected.add(event.target.value);else state.selected.delete(event.target.value);updateDeleteButton()});
+    $("#subscriptions-body").addEventListener("click",event=>{const test=event.target.closest(".sub-test"),del=event.target.closest(".sub-delete");if(test){$("#test-key").value=test.dataset.key;switchView("tests")}if(del)deleteSubscriptions([del.dataset.key])});
+    function updateDeleteButton(){$("#delete-selected").disabled=state.selected.size===0;$("#delete-selected").textContent=state.selected.size?`删除所选 (${state.selected.size})`:"删除所选";}
+    $("#select-all").addEventListener("change",event=>{$$(".sub-select").forEach(box=>{box.checked=event.target.checked;if(box.checked)state.selected.add(box.value);else state.selected.delete(box.value)});updateDeleteButton()});
+    $("#run-search").addEventListener("click",()=>{state.subQuery=$("#subscription-search").value.trim();state.subOffset=0;loadSubscriptions()});
+    $("#subscription-search").addEventListener("keydown",event=>{if(event.key==="Enter")$("#run-search").click()});
+    $("#clear-search").addEventListener("click",()=>{$("#subscription-search").value="";state.subQuery="";state.subOffset=0;loadSubscriptions()});
+    $("#subscription-prev").addEventListener("click",()=>{state.subOffset=Math.max(0,state.subOffset-state.subLimit);loadSubscriptions()});
+    $("#subscription-next").addEventListener("click",()=>{state.subOffset+=state.subLimit;loadSubscriptions()});
+    $("#delete-selected").addEventListener("click",()=>deleteSubscriptions(Array.from(state.selected)));
+    async function deleteSubscriptions(keys){if(!keys.length||!confirm(`确定删除 ${keys.length} 个订阅？删除后这些用户将不再收到地震预警。`))return;try{const data=await api("/api/admin/subscriptions/delete",{method:"POST",body:JSON.stringify({bark_ids:keys})});keys.forEach(key=>state.selected.delete(key));toast(`已删除 ${data.deleted} 个订阅`);await Promise.all([loadSubscriptions(),loadOverview()])}catch(err){toast(err.message,true)}}
+
+    $("#open-add").addEventListener("click",()=>$("#add-dialog").showModal());
+    $$("[data-close]").forEach(button=>button.addEventListener("click",()=>document.getElementById(button.dataset.close).close()));
+    $("#add-form").addEventListener("submit",async event=>{event.preventDefault();const keys=$("#add-keys").value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean);if(!keys.length){toast("请至少输入一个 Bark Key",true);return}const lat=Number($("#add-latitude").value),lon=Number($("#add-longitude").value),name=$("#add-location").value.trim(),server=$("#add-server").value.trim();const subscriptions=keys.map(key=>({bark_id:key,bark_server:server,locations:[{name,latitude:lat,longitude:lon}],notify_rules:{passive_max:1,active_max:2,critical_min:3},notify_bands:[{min:1,max:2,level:"passive"},{min:2,max:3,level:"active"},{min:3,max:99,level:"critical"}]}));const button=$("#add-submit");setBusy(button,true,"正在整批校验…");try{const data=await api("/api/admin/subscriptions/batch",{method:"POST",body:JSON.stringify({subscriptions,allow_updates:false})});$("#add-dialog").close();$("#add-keys").value="";toast(`新增 ${data.created} 个订阅`);state.subOffset=0;await Promise.all([loadSubscriptions(),loadOverview()])}catch(err){toast(err.message,true)}finally{setBusy(button,false)}});
+
+    async function loadAudits(){const body=$("#audits-body");body.innerHTML=`<tr><td colspan="8" class="empty">正在读取通知历史…</td></tr>`;try{const data=await api("/api/admin/audits?limit=200");renderAudits(data.items||[])}catch(err){body.innerHTML="";toast(err.message,true)}}
+    function renderAudits(items){const body=$("#audits-body");$("#audits-empty").classList.toggle("hidden",items.length!==0);body.innerHTML=items.map(item=>`<tr><td><div class="audit-event"><strong title="${escapeHTML(item.event_id)}">${escapeHTML(item.hypocenter||item.event_id||item.type)}</strong><span class="subtle">${item.magnitude?`M${Number(item.magnitude).toFixed(1)} · `:""}第 ${item.report_num||0} 报 · ${escapeHTML(item.type||"")}</span></div></td><td>${formatTime(item.received_at)}</td><td class="metric-good">${item.pushed||0}</td><td class="metric-warn">${item.filtered||0} / ${item.skipped||0}</td><td class="${item.failed?"metric-bad":"subtle"}">${item.failed||0}</td><td>${formatMillis(item.duration_ms)}</td><td>${formatMillis(item.elapsed_p90_ms)}</td><td><button class="btn btn-secondary btn-sm audit-open" data-id="${escapeHTML(item.id)}">查看明细</button></td></tr>`).join("")}
+    $("#audits-body").addEventListener("click",event=>{const button=event.target.closest(".audit-open");if(button)openAudit(button.dataset.id)});
+    $("#refresh-audits").addEventListener("click",loadAudits);
+    async function openAudit(id){state.auditID=id;if(!$("#audit-dialog").open)$("#audit-dialog").showModal();$("#audit-records-body").innerHTML=`<tr><td colspan="7" class="empty">正在读取明细…</td></tr>`;try{const params=new URLSearchParams({id,limit:"200",status:$("#audit-status").value,q:$("#audit-search").value.trim()});const data=await api("/api/admin/audit?"+params);renderAuditDetail(data)}catch(err){toast(err.message,true)}}
+    function renderAuditDetail(data){const s=data.summary;$("#audit-detail-title").textContent=s.event_id||data.id;$("#audit-detail-subtitle").textContent=`第 ${s.report_num||0} 报 · ${formatTime(s.received_at)} · ${s.type||""}`;$("#audit-summary").innerHTML=`<div><small>推送成功</small><strong class="metric-good">${s.pushed||0}</strong></div><div><small>规则过滤</small><strong class="metric-warn">${s.filtered||0}</strong></div><div><small>失败</small><strong class="${s.failed?"metric-bad":""}">${s.failed||0}</strong></div><div><small>总耗时</small><strong>${formatMillis(s.duration_ms)}</strong></div>`;const body=$("#audit-records-body");$("#audit-records-empty").classList.toggle("hidden",data.records.length!==0);body.innerHTML=data.records.map(r=>`<tr><td><div class="mono">${escapeHTML(r.bark_masked)}</div><div class="subtle mono" title="${escapeHTML(r.bark_hash)}">${escapeHTML(String(r.bark_hash||"").slice(0,12))}…</div></td><td>${escapeHTML(r.location_name||"—")}</td><td><span class="badge ${r.status==="pushed"?"ok":r.status==="failed"?"bad":"warn"}">${escapeHTML(r.status)}</span></td><td>${escapeHTML(r.notify_level||"—")}</td><td>${Number(r.estimated_intensity||0).toFixed(1)}</td><td>${formatMillis(r.elapsed_ms)}</td><td class="location-cell" title="${escapeHTML(r.error||r.reason||"")}">${escapeHTML(r.error||r.reason||"—")}</td></tr>`).join("");$("#audit-records-info").textContent=`显示 ${data.records.length} 条，共 ${data.total} 条符合条件`}
+    $("#audit-filter").addEventListener("click",()=>state.auditID&&openAudit(state.auditID));
+    $("#audit-search").addEventListener("keydown",event=>{if(event.key==="Enter")$("#audit-filter").click()});
+
+    $("#test-form").addEventListener("submit",async event=>{event.preventDefault();const key=$("#test-key").value.trim(),kind=$("#test-kind").value;if(!confirm(`确定向 Bark Key ${key} 发送一次${$("#test-kind").selectedOptions[0].textContent}？`))return;const button=$("#test-submit");setBusy(button,true,"正在发送…");try{const data=await api("/api/admin/test",{method:"POST",body:JSON.stringify({bark_id:key,kind})});toast(kind==="connectivity"?`测试已发送，重试 ${data.retries||0} 次`:`测试已发送，事件 ${data.event_id}`)}catch(err){toast(err.message,true)}finally{setBusy(button,false)}});
+    init();
+  </script>
+</body>
+</html>

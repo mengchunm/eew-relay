@@ -22,6 +22,7 @@
 - 新用户首次验证成功后直接保存为正式订阅
 - 用户管理页面：`/manage`，Bark Key 只放在 URL fragment 或请求头中
 - 用户管理 API：`GET /api/subscription`、`DELETE /api/unsubscribe`
+- 管理员后台：`/admin`，支持订阅管理、批量新增、通知审计、单用户测试和系统自检
 - 统计 API：`GET /api/stats`
 - 健康检查：`GET /health`
 - 数据源：`wss://ws-api.wolfx.jp/all_eew`
@@ -139,6 +140,23 @@ ingress:
 远程托管（remotely-managed）Tunnel 的 token 不要写入可被普通用户读取的 systemd unit，也不要长期放在进程命令行。把 token 保存到权限为 `0600` 的 root-only 文件，并让服务通过 `--token-file` 读取；token 一旦出现在日志、终端历史或 unit 文件中，应立即在 Cloudflare 后台轮换。
 
 ## 管理与模拟 API 鉴权
+
+部署者可启用独立管理员后台。账号密码优先通过仅部署机可读的 `.env` 注入，不要写入公开仓库：
+
+```dotenv
+EEW_ADMIN_USERNAME=your_admin_username
+EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
+```
+
+重启服务后访问 `https://eew.example.com/admin`。登录成功后，服务签发最长 24 小时、默认 8 小时有效的 HttpOnly、SameSite=Strict 签名会话 Cookie。管理员后台可以：
+
+- 分页搜索、查看和批量删除订阅；
+- 一次校验并新增最多 100 个 Bark Key，且默认拒绝覆盖已存在订阅；
+- 查看真实 EEW 的投递摘要及脱敏逐用户明细；
+- 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
+- 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
+
+管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
 
 Bark Key 同时是用户管理凭据。新页面和通知链接不再把 Key 放进服务器可见的 path 或 query：
 
