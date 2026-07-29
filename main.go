@@ -4059,8 +4059,13 @@ type deliveryAuditSummary struct {
 	Type                  string         `json:"type"`
 	OriginTime            string         `json:"origin_time"`
 	Hypocenter            string         `json:"hypocenter,omitempty"`
+	Latitude              float64        `json:"latitude,omitempty"`
+	Longitude             float64        `json:"longitude,omitempty"`
 	Magnitude             float64        `json:"magnitude,omitempty"`
+	DepthKM               float64        `json:"depth_km,omitempty"`
 	MaxIntensity          string         `json:"max_intensity,omitempty"`
+	Final                 bool           `json:"final,omitempty"`
+	Cancel                bool           `json:"cancel,omitempty"`
 	ReceivedAt            string         `json:"received_at"`
 	FanoutStartedAt       string         `json:"fanout_started_at"`
 	FanoutDoneAt          string         `json:"fanout_done_at"`
@@ -4458,8 +4463,13 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 		Type:                  event.Type,
 		OriginTime:            formatBeijing(event.OriginTime, time.RFC3339),
 		Hypocenter:            event.Hypocenter,
+		Latitude:              event.Latitude,
+		Longitude:             event.Longitude,
 		Magnitude:             event.Magnitude,
+		DepthKM:               event.DepthKM,
 		MaxIntensity:          event.MaxIntensity,
+		Final:                 event.Final,
+		Cancel:                event.Cancel,
 		ReceivedAt:            formatBeijing(receivedAt, time.RFC3339Nano),
 		FanoutStartedAt:       formatBeijing(startedAt, time.RFC3339Nano),
 		FanoutDoneAt:          formatBeijing(doneAt, time.RFC3339Nano),

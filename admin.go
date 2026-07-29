@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 const adminSessionCookie = "eew_admin_session"
@@ -47,6 +49,31 @@ type adminAuditSummary struct {
 	deliveryAuditSummary
 }
 
+type adminAuditEventGroup struct {
+	ID            string              `json:"id"`
+	EventID       string              `json:"event_id"`
+	Type          string              `json:"type"`
+	Source        string              `json:"source"`
+	OriginTime    string              `json:"origin_time"`
+	Hypocenter    string              `json:"hypocenter,omitempty"`
+	Latitude      float64             `json:"latitude,omitempty"`
+	Longitude     float64             `json:"longitude,omitempty"`
+	Magnitude     float64             `json:"magnitude,omitempty"`
+	DepthKM       float64             `json:"depth_km,omitempty"`
+	MaxIntensity  string              `json:"max_intensity,omitempty"`
+	Final         bool                `json:"final,omitempty"`
+	Cancel        bool                `json:"cancel,omitempty"`
+	FirstReceived string              `json:"first_received_at"`
+	LastReceived  string              `json:"last_received_at"`
+	ReportCount   int                 `json:"report_count"`
+	TotalPushed   int                 `json:"total_pushed"`
+	TotalFiltered int                 `json:"total_filtered"`
+	TotalSkipped  int                 `json:"total_skipped"`
+	TotalFailed   int                 `json:"total_failed"`
+	Latest        adminAuditSummary   `json:"latest"`
+	Reports       []adminAuditSummary `json:"reports"`
+}
+
 type adminBatchSubscriptionsRequest struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 	AllowUpdates  bool           `json:"allow_updates"`
@@ -59,6 +86,13 @@ type adminBatchDeleteRequest struct {
 type adminTestRequest struct {
 	BarkID string `json:"bark_id"`
 	Kind   string `json:"kind"`
+}
+
+type adminSubscriptionLivenessIssue struct {
+	BarkID     string `json:"bark_id"`
+	BarkServer string `json:"bark_server"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
 }
 
 func newAdminAuth(cfg ServerConfig) *adminAuth {
@@ -232,13 +266,16 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
 	}))
 	mux.HandleFunc("GET /api/admin/subscriptions", auth.require(func(w http.ResponseWriter, r *http.Request) {
-		serveAdminSubscriptions(w, r, store)
+		serveAdminSubscriptions(w, r, cfg, store)
 	}))
 	mux.HandleFunc("POST /api/admin/subscriptions/batch", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		serveAdminBatchSubscriptions(w, r, cfg, store)
 	}))
 	mux.HandleFunc("POST /api/admin/subscriptions/delete", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		serveAdminDeleteSubscriptions(w, r, store)
+	}))
+	mux.HandleFunc("POST /api/admin/subscriptions/liveness", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		serveAdminSubscriptionLiveness(w, r, cfg, store)
 	}))
 	mux.HandleFunc("GET /api/admin/audits", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		serveAdminAudits(w, r, cfg)
@@ -271,8 +308,15 @@ func parseAdminPage(r *http.Request, defaultLimit, maxLimit int) (int, int) {
 	return offset, limit
 }
 
-func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, store *Store) {
+func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	serverFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("server")))
+	levelFilter := ""
+	if requestedLevel := strings.TrimSpace(r.URL.Query().Get("notify_level")); validNotifyLevel(requestedLevel) {
+		levelFilter = normalizeNotifyLevel(requestedLevel)
+	}
+	createdFrom, createdFromOK := parseAdminFilterDate(r.URL.Query().Get("created_from"), false)
+	createdTo, createdToOK := parseAdminFilterDate(r.URL.Query().Get("created_to"), true)
 	offset, limit := parseAdminPage(r, 50, 200)
 	subscriptions := store.List()
 	sort.Slice(subscriptions, func(i, j int) bool {
@@ -284,6 +328,26 @@ func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, store *Stor
 	filtered := subscriptions[:0]
 	for _, sub := range subscriptions {
 		if query != "" && !adminSubscriptionMatches(sub, query) {
+			continue
+		}
+		switch serverFilter {
+		case "official":
+			if !isOfficialBarkServer(sub.BarkServer) {
+				continue
+			}
+		case "self_hosted":
+			if !isSelfHostedBarkServer(sub.BarkServer, cfg) {
+				continue
+			}
+		}
+		if levelFilter != "" && !adminSubscriptionHasLevel(sub, levelFilter) {
+			continue
+		}
+		createdAt := time.UnixMilli(sub.CreatedAt)
+		if createdFromOK && createdAt.Before(createdFrom) {
+			continue
+		}
+		if createdToOK && !createdAt.Before(createdTo) {
 			continue
 		}
 		filtered = append(filtered, sub)
@@ -299,6 +363,30 @@ func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, store *Stor
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
 		"items": filtered[offset:end], "total": total, "offset": offset, "limit": limit,
 	}})
+}
+
+func parseAdminFilterDate(value string, exclusiveEnd bool) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, beijingTZ)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if exclusiveEnd {
+		parsed = parsed.AddDate(0, 0, 1)
+	}
+	return parsed, true
+}
+
+func adminSubscriptionHasLevel(sub Subscription, level string) bool {
+	for _, band := range normalizeNotificationBands(sub.NotifyBands, sub.NotifyRules) {
+		if band.Level == level {
+			return true
+		}
+	}
+	return false
 }
 
 func adminSubscriptionMatches(sub Subscription, query string) bool {
@@ -458,6 +546,110 @@ func serveAdminDeleteSubscriptions(w http.ResponseWriter, r *http.Request, store
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "订阅已删除", Data: map[string]any{"deleted": deleted, "not_found": len(keys) - deleted}})
 }
 
+func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
+	startedAt := time.Now()
+	subscriptions := store.List()
+	selfHostedTotal := 0
+	for _, sub := range subscriptions {
+		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
+			selfHostedTotal++
+		}
+	}
+	deviceKeys := map[string]struct{}{}
+	if selfHostedTotal > 0 {
+		var err error
+		deviceKeys, err = loadSelfHostedBarkKeys(cfg)
+		if err != nil {
+			log.Printf("admin subscription liveness failed to read Bark devices: %v", err)
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Message: "无法读取自建 Bark 设备库，未执行测活"})
+			return
+		}
+	}
+
+	selfHostedAlive := 0
+	selfHostedMissing := 0
+	officialNotChecked := 0
+	invalid := 0
+	issues := make([]adminSubscriptionLivenessIssue, 0)
+	issueTotal := 0
+	appendIssue := func(issue adminSubscriptionLivenessIssue) {
+		issueTotal++
+		if len(issues) < 500 {
+			issues = append(issues, issue)
+		}
+	}
+	for _, sub := range subscriptions {
+		if err := validateSubscription(sub); err != nil {
+			invalid++
+			appendIssue(adminSubscriptionLivenessIssue{BarkID: sub.BarkID, BarkServer: sub.BarkServer, Status: "invalid_subscription", Message: err.Error()})
+			continue
+		}
+		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
+			if _, ok := deviceKeys[sub.BarkID]; ok {
+				selfHostedAlive++
+			} else {
+				selfHostedMissing++
+				appendIssue(adminSubscriptionLivenessIssue{BarkID: sub.BarkID, BarkServer: sub.BarkServer, Status: "missing_device", Message: "自建 Bark 设备库中不存在该 Key"})
+			}
+			continue
+		}
+		officialNotChecked++
+	}
+	healthy := selfHostedMissing == 0 && invalid == 0
+	log.Printf("admin subscription liveness total=%d self_hosted=%d alive=%d missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
+		len(subscriptions), selfHostedTotal, selfHostedAlive, selfHostedMissing, officialNotChecked, invalid, time.Since(startedAt), clientIP(r))
+	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "无推送测活完成", Data: map[string]any{
+		"healthy":                    healthy,
+		"checked_at":                 time.Now().UTC().Format(time.RFC3339),
+		"duration_ms":                time.Since(startedAt).Milliseconds(),
+		"total_subscriptions":        len(subscriptions),
+		"self_hosted_total":          selfHostedTotal,
+		"self_hosted_alive":          selfHostedAlive,
+		"self_hosted_missing":        selfHostedMissing,
+		"official_not_checked":       officialNotChecked,
+		"invalid_subscriptions":      invalid,
+		"device_keys":                len(deviceKeys),
+		"issue_total":                issueTotal,
+		"issues":                     issues,
+		"issues_truncated":           issueTotal > len(issues),
+		"notification_sent":          false,
+		"official_check_explanation": "官方 Bark 不提供无推送 Key 校验接口，因此仅统计、不发送测试消息。",
+	}})
+}
+
+func loadSelfHostedBarkKeys(cfg Config) (map[string]struct{}, error) {
+	if dsn := strings.TrimSpace(cfg.Bark.DeviceDBDSN); dsn != "" {
+		return selfHostedBarkKeysMySQL(dsn)
+	}
+	path := strings.TrimSpace(cfg.Bark.DeviceDBPath)
+	if path == "" {
+		return nil, errors.New("bark device db path is empty")
+	}
+	db, cleanup, err := openBarkDeviceDB(path)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	defer db.Close()
+	keys := make(map[string]struct{})
+	err = db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("device"))
+		if bucket == nil {
+			return errors.New("device bucket not found")
+		}
+		return bucket.ForEach(func(key, _ []byte) error {
+			if len(key) > 0 {
+				keys[string(key)] = struct{}{}
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
 func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier *Notifier, health *RuntimeHealth) map[string]any {
 	now := time.Now()
 	staleAfter := time.Duration(cfg.Wolfx.HealthStaleSeconds) * time.Second
@@ -494,7 +686,11 @@ func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier 
 			queueLastError = err.Error()
 		}
 	}
-	_, auditTotal, auditErr := listDeliveryAuditSummaries(cfg, 1)
+	auditReports, auditTotal, auditErr := listDeliveryAuditSummaries(cfg, 0)
+	auditEvents := 0
+	if auditErr == nil {
+		auditEvents = len(groupDeliveryAuditSummaries(cfg, auditReports))
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	paused, pausedMessage, pausedReason := subscriptionPauseState(cfg, store.Count())
@@ -502,7 +698,7 @@ func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier 
 		{"name": "地震数据源", "healthy": dataSourceHealthy, "detail": dataSourceCheckDetail(runtimeSnapshot, dataSourceHealthy)},
 		{"name": "订阅存储", "healthy": storageHealthy, "detail": storageType, "error": storageError},
 		{"name": "推送队列", "healthy": notifier == nil || notifier.queue == nil || queueConnected, "detail": queueStatus, "error": queueLastError},
-		{"name": "投递审计", "healthy": auditErr == nil, "detail": fmt.Sprintf("%d 条记录，保留 %d 天", auditTotal, cfg.Server.AuditRetentionDays), "error": errorString(auditErr)},
+		{"name": "投递审计", "healthy": auditErr == nil, "detail": fmt.Sprintf("%d 次地震，%d 个报次，保留 %d 天", auditEvents, auditTotal, cfg.Server.AuditRetentionDays), "error": errorString(auditErr)},
 	}
 	return map[string]any{
 		"checked_at":                 now.UTC().Format(time.RFC3339),
@@ -517,7 +713,7 @@ func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier 
 		"storage":                    map[string]any{"type": storageType, "healthy": storageHealthy, "error": storageError},
 		"queue":                      map[string]any{"enabled": notifier != nil && notifier.queue != nil, "connected": queueConnected, "status": queueStatus, "last_error": queueLastError},
 		"relay":                      map[string]any{"enabled": notifier != nil && notifier.relay != nil},
-		"audit":                      map[string]any{"records": auditTotal, "retention_days": cfg.Server.AuditRetentionDays, "error": errorString(auditErr)},
+		"audit":                      map[string]any{"events": auditEvents, "records": auditTotal, "retention_days": cfg.Server.AuditRetentionDays, "error": errorString(auditErr)},
 		"process":                    map[string]any{"go_version": runtime.Version(), "goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": memory.Alloc, "memory_sys_bytes": memory.Sys},
 		"default_bark_server":        normalizeBarkServer("", cfg),
 		"self_hosted_bark_server":    strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/"),
@@ -596,14 +792,150 @@ func listDeliveryAuditSummaries(cfg Config, limit int) ([]adminAuditSummary, int
 	return items, total, nil
 }
 
+func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []adminAuditEventGroup {
+	historyIndex := auditHistoryIndex(cfg)
+	groups := make(map[string][]adminAuditSummary)
+	for _, report := range reports {
+		enrichAuditSummary(&report.deliveryAuditSummary, historyIndex)
+		key := strings.ToLower(strings.TrimSpace(report.Type)) + "|" + strings.ToLower(strings.TrimSpace(report.EventID))
+		if strings.Trim(key, "|") == "" {
+			key = report.ID
+		}
+		groups[key] = append(groups[key], report)
+	}
+	result := make([]adminAuditEventGroup, 0, len(groups))
+	for key, groupReports := range groups {
+		sort.Slice(groupReports, func(i, j int) bool {
+			if !groupReports[i].Modified.Equal(groupReports[j].Modified) {
+				return groupReports[i].Modified.After(groupReports[j].Modified)
+			}
+			return groupReports[i].ReportNum > groupReports[j].ReportNum
+		})
+		latest := groupReports[0]
+		group := adminAuditEventGroup{
+			ID:            hashKey(key)[:16],
+			EventID:       latest.EventID,
+			Type:          latest.Type,
+			Source:        strings.TrimSuffix(strings.ToUpper(latest.Type), "_EEW"),
+			OriginTime:    latest.OriginTime,
+			Hypocenter:    latest.Hypocenter,
+			Latitude:      latest.Latitude,
+			Longitude:     latest.Longitude,
+			Magnitude:     latest.Magnitude,
+			DepthKM:       latest.DepthKM,
+			MaxIntensity:  latest.MaxIntensity,
+			Final:         latest.Final,
+			Cancel:        latest.Cancel,
+			FirstReceived: latest.ReceivedAt,
+			LastReceived:  latest.ReceivedAt,
+			ReportCount:   len(groupReports),
+			Latest:        latest,
+			Reports:       groupReports,
+		}
+		for _, report := range groupReports {
+			group.TotalPushed += report.Pushed
+			group.TotalFiltered += report.Filtered
+			group.TotalSkipped += report.Skipped
+			group.TotalFailed += report.Failed
+			if group.Hypocenter == "" && report.Hypocenter != "" {
+				group.Hypocenter = report.Hypocenter
+			}
+			if group.Latitude == 0 && group.Longitude == 0 && (report.Latitude != 0 || report.Longitude != 0) {
+				group.Latitude, group.Longitude = report.Latitude, report.Longitude
+			}
+			if group.Magnitude == 0 && report.Magnitude != 0 {
+				group.Magnitude = report.Magnitude
+			}
+			if group.DepthKM == 0 && report.DepthKM != 0 {
+				group.DepthKM = report.DepthKM
+			}
+			if group.MaxIntensity == "" && report.MaxIntensity != "" {
+				group.MaxIntensity = report.MaxIntensity
+			}
+			if group.OriginTime == "" && report.OriginTime != "" {
+				group.OriginTime = report.OriginTime
+			}
+			if report.ReceivedAt < group.FirstReceived || group.FirstReceived == "" {
+				group.FirstReceived = report.ReceivedAt
+			}
+			if report.ReceivedAt > group.LastReceived {
+				group.LastReceived = report.ReceivedAt
+			}
+			group.Final = group.Final || report.Final
+			group.Cancel = group.Cancel || report.Cancel
+		}
+		result = append(result, group)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Latest.Modified.After(result[j].Latest.Modified)
+	})
+	return result
+}
+
+func auditHistoryIndex(cfg Config) map[string]HistoryRecord {
+	index := make(map[string]HistoryRecord)
+	records := builtinHistoryRecords()
+	if cache, err := loadHistoryCache(cfg.Server.HistoryPath); err == nil {
+		records = append(records, cache.Records...)
+	}
+	for _, record := range records {
+		for _, key := range []string{record.EventID, record.Key} {
+			key = strings.ToLower(strings.TrimSpace(key))
+			if key != "" {
+				index[key] = record
+			}
+		}
+	}
+	return index
+}
+
+func enrichAuditSummary(summary *deliveryAuditSummary, historyIndex map[string]HistoryRecord) {
+	if summary == nil {
+		return
+	}
+	record, ok := historyIndex[strings.ToLower(strings.TrimSpace(summary.EventID))]
+	if !ok {
+		return
+	}
+	if summary.Hypocenter == "" {
+		summary.Hypocenter = record.Hypocenter
+	}
+	if summary.Latitude == 0 && summary.Longitude == 0 {
+		summary.Latitude, summary.Longitude = record.Latitude, record.Longitude
+	}
+	if summary.Magnitude == 0 {
+		summary.Magnitude = record.Magnitude
+	}
+	if summary.DepthKM == 0 {
+		summary.DepthKM = record.DepthKM
+	}
+	if summary.MaxIntensity == "" {
+		summary.MaxIntensity = record.MaxIntensity
+	}
+	if summary.OriginTime == "" {
+		summary.OriginTime = record.OriginTime
+	}
+}
+
 func serveAdminAudits(w http.ResponseWriter, r *http.Request, cfg Config) {
-	_, limit := parseAdminPage(r, 100, 500)
-	items, total, err := listDeliveryAuditSummaries(cfg, limit)
+	offset, limit := parseAdminPage(r, 100, 500)
+	reports, reportTotal, err := listDeliveryAuditSummaries(cfg, 0)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取投递审计失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{"items": items, "total": total}})
+	groups := groupDeliveryAuditSummaries(cfg, reports)
+	total := len(groups)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
+		"items": groups[offset:end], "total": total, "report_total": reportTotal, "offset": offset, "limit": limit,
+	}})
 }
 
 func validAuditID(value string) bool {
@@ -628,6 +960,7 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 	summary.DetailPath = ""
+	enrichAuditSummary(&summary, auditHistoryIndex(cfg))
 	file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
 	compressed := err == nil
 	if errors.Is(err, os.ErrNotExist) {

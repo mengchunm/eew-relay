@@ -150,9 +150,10 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 
 重启服务后访问 `https://eew.example.com/admin`。登录成功后，服务签发最长 24 小时、默认 8 小时有效的 HttpOnly、SameSite=Strict 签名会话 Cookie。管理员后台可以：
 
-- 分页搜索、查看和批量删除订阅；
+- 按 Bark Key/地点、服务器、通知等级和订阅日期筛选，分页查看和批量删除订阅；
 - 一次校验并新增最多 100 个 Bark Key，且默认拒绝覆盖已存在订阅；
-- 查看真实 EEW 的投递摘要及脱敏逐用户明细；
+- 将同一真实地震的多个报次归纳展示，查看震中、震级、深度、烈度、坐标、各报投递变化及脱敏逐用户明细；
+- 只读比对全部订阅与自建 Bark 设备库完成整体测活，不触发 Bark/APNs 消息；
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
 
