@@ -15,12 +15,14 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -42,6 +44,45 @@ type adminAuth struct {
 type adminSessionClaims struct {
 	Username  string `json:"u"`
 	ExpiresAt int64  `json:"e"`
+}
+
+type adminServiceStatus struct {
+	ID            string              `json:"id"`
+	Name          string              `json:"name"`
+	Status        string              `json:"status"`
+	Healthy       bool                `json:"healthy"`
+	Enabled       bool                `json:"enabled"`
+	Detail        string              `json:"detail,omitempty"`
+	Error         string              `json:"error,omitempty"`
+	LatencyMS     int64               `json:"latency_ms,omitempty"`
+	LastSuccessAt string              `json:"last_success_at,omitempty"`
+	Metrics       map[string]any      `json:"metrics,omitempty"`
+	Workers       []queueWorkerHealth `json:"workers,omitempty"`
+}
+
+type adminServiceHealthSnapshot struct {
+	CheckedAt         string               `json:"checked_at"`
+	DurationMS        int64                `json:"duration_ms"`
+	Status            string               `json:"status"`
+	Healthy           bool                 `json:"healthy"`
+	EnabledServices   int                  `json:"enabled_services"`
+	HealthyServices   int                  `json:"healthy_services"`
+	DegradedServices  int                  `json:"degraded_services"`
+	UnhealthyServices int                  `json:"unhealthy_services"`
+	Services          []adminServiceStatus `json:"services"`
+}
+
+type adminServiceMonitor struct {
+	cfg         Config
+	store       *Store
+	notifier    *Notifier
+	health      *RuntimeHealth
+	httpClient  *http.Client
+	probeMu     sync.Mutex
+	cached      adminServiceHealthSnapshot
+	cachedAt    time.Time
+	mu          sync.Mutex
+	lastSuccess map[string]time.Time
 }
 
 type adminAuditSummary struct {
@@ -233,6 +274,7 @@ func setAdminSessionCookie(w http.ResponseWriter, r *http.Request, value string,
 
 func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) {
 	auth := newAdminAuth(cfg.Server)
+	serviceMonitor := newAdminServiceMonitor(cfg, store, notifier, health)
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, _ *http.Request) {
 		data, err := publicFS.ReadFile("public/admin.html")
 		if err != nil {
@@ -290,6 +332,11 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 
 	mux.HandleFunc("GET /api/admin/overview", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		data := buildAdminOverview(r.Context(), cfg, store, notifier, health)
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
+	}))
+	mux.HandleFunc("GET /api/admin/services", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		data := serviceMonitor.Snapshot(r.Context())
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
 	}))
 	mux.HandleFunc("GET /api/admin/subscriptions", auth.require(func(w http.ResponseWriter, r *http.Request) {
@@ -863,6 +910,422 @@ func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier 
 		"self_hosted_bark_server":    strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/"),
 		"checks":                     checks,
 	}
+}
+
+func newAdminServiceMonitor(cfg Config, store *Store, notifier *Notifier, health *RuntimeHealth) *adminServiceMonitor {
+	return &adminServiceMonitor{
+		cfg:      cfg,
+		store:    store,
+		notifier: notifier,
+		health:   health,
+		httpClient: &http.Client{
+			Timeout: 2500 * time.Millisecond,
+			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+				if len(via) >= 3 {
+					return errors.New("too many health probe redirects")
+				}
+				return nil
+			},
+		},
+		lastSuccess: make(map[string]time.Time),
+	}
+}
+
+func (m *adminServiceMonitor) Snapshot(ctx context.Context) adminServiceHealthSnapshot {
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	if !m.cachedAt.IsZero() && time.Since(m.cachedAt) < 3*time.Second {
+		return m.cached
+	}
+	started := time.Now()
+	probes := []func(context.Context) adminServiceStatus{
+		m.probeApplication,
+		m.probeEarthquakeSource,
+		m.probeSubscriptionStore,
+		m.probePushQueue,
+		m.probePushWorkers,
+		func(ctx context.Context) adminServiceStatus {
+			return m.probeBark(ctx, "official_bark", "官方 Bark", m.cfg.Bark.Server, m.cfg.Bark.Server)
+		},
+		func(ctx context.Context) adminServiceStatus {
+			probeURL := m.cfg.Bark.SelfHostedInternalServer
+			if strings.TrimSpace(probeURL) == "" {
+				probeURL = m.cfg.Bark.SelfHostedServer
+			}
+			return m.probeBark(ctx, "self_hosted_bark", "自建 Bark", m.cfg.Bark.SelfHostedServer, probeURL)
+		},
+		m.probeBarkDeviceStore,
+		m.probeAuditStorage,
+		m.probeRelay,
+	}
+
+	results := make(chan adminServiceStatus, len(probes))
+	var wait sync.WaitGroup
+	for _, probe := range probes {
+		wait.Add(1)
+		go func(probe func(context.Context) adminServiceStatus) {
+			defer wait.Done()
+			results <- probe(ctx)
+		}(probe)
+	}
+	wait.Wait()
+	close(results)
+	byID := make(map[string]adminServiceStatus, len(probes))
+	for result := range results {
+		byID[result.ID] = result
+	}
+
+	order := []string{"application", "earthquake_source", "subscription_store", "push_queue", "push_workers", "official_bark", "self_hosted_bark", "bark_device_store", "audit_storage", "fanout_relay"}
+	now := time.Now()
+	snapshot := adminServiceHealthSnapshot{CheckedAt: now.UTC().Format(time.RFC3339), Status: "healthy", Healthy: true}
+	for _, id := range order {
+		result, ok := byID[id]
+		if !ok {
+			continue
+		}
+		result = m.withLastSuccess(result, now)
+		snapshot.Services = append(snapshot.Services, result)
+		if !result.Enabled {
+			continue
+		}
+		snapshot.EnabledServices++
+		switch result.Status {
+		case "healthy":
+			snapshot.HealthyServices++
+		case "degraded":
+			snapshot.DegradedServices++
+		default:
+			snapshot.UnhealthyServices++
+		}
+	}
+	if snapshot.UnhealthyServices > 0 {
+		snapshot.Status = "unhealthy"
+		snapshot.Healthy = false
+	} else if snapshot.DegradedServices > 0 {
+		snapshot.Status = "degraded"
+		snapshot.Healthy = false
+	}
+	snapshot.DurationMS = time.Since(started).Milliseconds()
+	m.cached = snapshot
+	m.cachedAt = time.Now()
+	return snapshot
+}
+
+func (m *adminServiceMonitor) withLastSuccess(result adminServiceStatus, now time.Time) adminServiceStatus {
+	m.mu.Lock()
+	if result.Enabled && result.Status == "healthy" {
+		m.lastSuccess[result.ID] = now
+	}
+	lastSuccess := m.lastSuccess[result.ID]
+	m.mu.Unlock()
+	if !lastSuccess.IsZero() {
+		result.LastSuccessAt = lastSuccess.UTC().Format(time.RFC3339)
+	}
+	result.Healthy = result.Status == "healthy"
+	return result
+}
+
+func healthyAdminService(id, name, detail string) adminServiceStatus {
+	return adminServiceStatus{ID: id, Name: name, Status: "healthy", Healthy: true, Enabled: true, Detail: detail}
+}
+
+func disabledAdminService(id, name, detail string) adminServiceStatus {
+	return adminServiceStatus{ID: id, Name: name, Status: "disabled", Enabled: false, Detail: detail}
+}
+
+func failedAdminService(id, name, detail string, err error) adminServiceStatus {
+	result := adminServiceStatus{ID: id, Name: name, Status: "unhealthy", Enabled: true, Detail: detail}
+	if err != nil {
+		result.Error = truncateAdminServiceError(err.Error())
+	}
+	return result
+}
+
+func truncateAdminServiceError(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 300 {
+		return value[:300] + "…"
+	}
+	return value
+}
+
+func (m *adminServiceMonitor) probeApplication(context.Context) adminServiceStatus {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	uptime := time.Since(adminProcessStartedAt)
+	result := healthyAdminService("application", "EEW 应用", fmt.Sprintf("已运行 %s", compactAdminDuration(uptime)))
+	result.Metrics = map[string]any{
+		"go_version":         runtime.Version(),
+		"goroutines":         runtime.NumGoroutine(),
+		"memory_alloc_bytes": memory.Alloc,
+		"memory_sys_bytes":   memory.Sys,
+		"uptime_seconds":     int64(uptime.Seconds()),
+	}
+	return result
+}
+
+func (m *adminServiceMonitor) probeEarthquakeSource(context.Context) adminServiceStatus {
+	now := time.Now()
+	snapshot := m.health.Snapshot()
+	staleAfter := time.Duration(m.cfg.Wolfx.HealthStaleSeconds) * time.Second
+	if staleAfter <= 0 {
+		staleAfter = 180 * time.Second
+	}
+	healthy := m.health.DataSourceHealthy(now, staleAfter)
+	result := healthyAdminService("earthquake_source", "Wolfx 地震数据源", dataSourceCheckDetail(snapshot, healthy))
+	if !healthy {
+		result.Status = "unhealthy"
+		result.Healthy = false
+		result.Error = truncateAdminServiceError(snapshot.LastError)
+	}
+	result.Metrics = map[string]any{
+		"connected":           snapshot.WebSocketConnected,
+		"last_message_at":     snapshot.LastMessageAt,
+		"last_processed_at":   snapshot.LastProcessedAt,
+		"queue_depth":         snapshot.QueueDepth,
+		"queue_dropped":       snapshot.QueueDropped,
+		"queue_coalesced":     snapshot.QueueCoalesced,
+		"stale_after_seconds": int64(staleAfter.Seconds()),
+	}
+	return result
+}
+
+func (m *adminServiceMonitor) probeSubscriptionStore(ctx context.Context) adminServiceStatus {
+	started := time.Now()
+	result := healthyAdminService("subscription_store", "订阅数据库", "JSON 文件存储")
+	result.Metrics = map[string]any{"subscriptions": m.store.Count(), "type": "json"}
+	m.store.mu.RLock()
+	backend := m.store.backend
+	m.store.mu.RUnlock()
+	if backend == nil {
+		result.LatencyMS = time.Since(started).Milliseconds()
+		return result
+	}
+	postgres, ok := backend.(*postgresSubscriptionBackend)
+	if !ok {
+		result.Detail = "自定义持久化后端"
+		result.Metrics["type"] = "custom"
+		return result
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := postgres.db.PingContext(checkCtx)
+	cancel()
+	result.LatencyMS = time.Since(started).Milliseconds()
+	result.Detail = "PostgreSQL 连接正常"
+	result.Metrics["type"] = "postgresql"
+	stats := postgres.db.Stats()
+	result.Metrics["total_connections"] = stats.OpenConnections
+	result.Metrics["acquired_connections"] = stats.InUse
+	result.Metrics["idle_connections"] = stats.Idle
+	if err != nil {
+		return failedAdminService("subscription_store", "订阅数据库", "PostgreSQL 连接失败", err)
+	}
+	return result
+}
+
+func (m *adminServiceMonitor) probePushQueue(context.Context) adminServiceStatus {
+	if m.notifier == nil || m.notifier.queue == nil || m.notifier.queue.nc == nil {
+		return disabledAdminService("push_queue", "NATS 推送队列", "未启用队列，应用直接投递")
+	}
+	queue := m.notifier.queue
+	started := time.Now()
+	if !queue.nc.IsConnected() {
+		err := queue.nc.LastError()
+		if err == nil {
+			err = errors.New(queue.nc.Status().String())
+		}
+		return failedAdminService("push_queue", "NATS 推送队列", "连接已断开", err)
+	}
+	info, err := queue.js.StreamInfo(queue.cfg.Stream)
+	latency := time.Since(started).Milliseconds()
+	if err != nil {
+		result := failedAdminService("push_queue", "NATS 推送队列", "已连接，但无法读取 JetStream", err)
+		result.LatencyMS = latency
+		return result
+	}
+	result := healthyAdminService("push_queue", "NATS 推送队列", "JetStream 连接正常")
+	result.LatencyMS = latency
+	result.Metrics = map[string]any{
+		"status":        queue.nc.Status().String(),
+		"stream":        info.Config.Name,
+		"messages":      info.State.Msgs,
+		"bytes":         info.State.Bytes,
+		"consumers":     info.State.Consumers,
+		"async_pending": queue.js.PublishAsyncPending(),
+	}
+	if info.State.Msgs > 0 {
+		result.Detail = fmt.Sprintf("队列处理中：%d 条待消费", info.State.Msgs)
+		if !info.State.FirstTime.IsZero() {
+			result.Metrics["oldest_message_at"] = info.State.FirstTime.UTC().Format(time.RFC3339)
+			if time.Since(info.State.FirstTime) > 30*time.Second {
+				result.Status = "degraded"
+				result.Healthy = false
+				result.Detail = fmt.Sprintf("队列积压：%d 条，最旧已等待 %s", info.State.Msgs, compactAdminDuration(time.Since(info.State.FirstTime)))
+			}
+		}
+	}
+	return result
+}
+
+func (m *adminServiceMonitor) probePushWorkers(context.Context) adminServiceStatus {
+	if m.notifier == nil || m.notifier.queue == nil {
+		return disabledAdminService("push_workers", "推送 Worker", "未启用 NATS Worker")
+	}
+	now := time.Now()
+	workers, expected, staleAfter := m.notifier.queue.workerHealth(now)
+	active := 0
+	for _, worker := range workers {
+		if worker.Active {
+			active++
+		}
+	}
+	result := healthyAdminService("push_workers", "推送 Worker", fmt.Sprintf("%d / %d 个 Worker 在线", active, expected))
+	result.Workers = workers
+	result.Metrics = map[string]any{"active": active, "expected": expected, "stale_after_seconds": int64(staleAfter.Seconds())}
+	if active < expected {
+		result.Status = "degraded"
+		result.Healthy = false
+		if active == 0 && time.Since(adminProcessStartedAt) > staleAfter {
+			result.Status = "unhealthy"
+		}
+		result.Error = fmt.Sprintf("缺少 %d 个有效 Worker 心跳", expected-active)
+	}
+	return result
+}
+
+func (m *adminServiceMonitor) probeBark(ctx context.Context, id, name, displayURL, probeBaseURL string) adminServiceStatus {
+	displayURL = strings.TrimRight(strings.TrimSpace(displayURL), "/")
+	probeBaseURL = strings.TrimRight(strings.TrimSpace(probeBaseURL), "/")
+	if displayURL == "" || probeBaseURL == "" {
+		return disabledAdminService(id, name, "未配置")
+	}
+	started := time.Now()
+	probeCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeBaseURL+"/ping", nil)
+	if err != nil {
+		return failedAdminService(id, name, barkServiceHost(displayURL), err)
+	}
+	request.Header.Set("Accept", "text/plain, application/json")
+	request.Header.Set("User-Agent", "eew-bark-health-monitor/1.0")
+	response, err := m.httpClient.Do(request)
+	latency := time.Since(started).Milliseconds()
+	if err != nil {
+		result := failedAdminService(id, name, barkServiceHost(displayURL), err)
+		result.LatencyMS = latency
+		return result
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		result := failedAdminService(id, name, barkServiceHost(displayURL), fmt.Errorf("HTTP %d", response.StatusCode))
+		result.LatencyMS = latency
+		return result
+	}
+	result := healthyAdminService(id, name, barkServiceHost(displayURL)+" /ping 正常")
+	result.LatencyMS = latency
+	result.Metrics = map[string]any{"endpoint": barkServiceHost(displayURL), "http_status": response.StatusCode, "notification_sent": false}
+	return result
+}
+
+func barkServiceHost(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return "已配置服务"
+}
+
+func (m *adminServiceMonitor) probeBarkDeviceStore(ctx context.Context) adminServiceStatus {
+	if strings.TrimSpace(m.cfg.Bark.SelfHostedServer) == "" {
+		return disabledAdminService("bark_device_store", "Bark 设备数据库", "未配置自建 Bark")
+	}
+	started := time.Now()
+	if dsn := strings.TrimSpace(m.cfg.Bark.DeviceDBDSN); dsn != "" {
+		db, err := barkMySQLPool(dsn)
+		if err != nil {
+			return failedAdminService("bark_device_store", "Bark 设备数据库", "MySQL 初始化失败", err)
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err = db.PingContext(checkCtx)
+		cancel()
+		latency := time.Since(started).Milliseconds()
+		if err != nil {
+			result := failedAdminService("bark_device_store", "Bark 设备数据库", "MySQL 连接失败", err)
+			result.LatencyMS = latency
+			return result
+		}
+		stats := db.Stats()
+		result := healthyAdminService("bark_device_store", "Bark 设备数据库", "MySQL 连接正常")
+		result.LatencyMS = latency
+		result.Metrics = map[string]any{"type": "mysql", "open_connections": stats.OpenConnections, "in_use": stats.InUse, "idle": stats.Idle, "wait_count": stats.WaitCount}
+		return result
+	}
+	path := strings.TrimSpace(m.cfg.Bark.DeviceDBPath)
+	if path == "" {
+		return failedAdminService("bark_device_store", "Bark 设备数据库", "设备数据库未配置", errors.New("device database path is empty"))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return failedAdminService("bark_device_store", "Bark 设备数据库", "bbolt 文件不可读", err)
+	}
+	result := healthyAdminService("bark_device_store", "Bark 设备数据库", "bbolt 文件可读")
+	result.LatencyMS = time.Since(started).Milliseconds()
+	result.Metrics = map[string]any{"type": "bbolt", "size_bytes": info.Size(), "modified_at": info.ModTime().UTC().Format(time.RFC3339)}
+	return result
+}
+
+func (m *adminServiceMonitor) probeAuditStorage(context.Context) adminServiceStatus {
+	started := time.Now()
+	directory := auditDirectory(m.cfg)
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		result := healthyAdminService("audit_storage", "投递审计存储", "审计目录尚无记录")
+		result.LatencyMS = time.Since(started).Milliseconds()
+		result.Metrics = map[string]any{"files": 0, "retention_days": m.cfg.Server.AuditRetentionDays}
+		return result
+	}
+	if err != nil {
+		return failedAdminService("audit_storage", "投递审计存储", "审计目录不可读", err)
+	}
+	files := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			files++
+		}
+	}
+	result := healthyAdminService("audit_storage", "投递审计存储", fmt.Sprintf("目录可读，%d 个文件", files))
+	result.LatencyMS = time.Since(started).Milliseconds()
+	result.Metrics = map[string]any{"files": files, "retention_days": m.cfg.Server.AuditRetentionDays}
+	return result
+}
+
+func (m *adminServiceMonitor) probeRelay(context.Context) adminServiceStatus {
+	if m.notifier == nil || m.notifier.relay == nil {
+		return disabledAdminService("fanout_relay", "推送中继", "未启用")
+	}
+	result := healthyAdminService("fanout_relay", "推送中继", "已配置，健康由实际投递结果验证")
+	result.Metrics = map[string]any{"share_percent": m.notifier.relay.cfg.SharePercent}
+	return result
+}
+
+func compactAdminDuration(value time.Duration) string {
+	if value < 0 {
+		value = 0
+	}
+	days := int(value / (24 * time.Hour))
+	hours := int(value/time.Hour) % 24
+	minutes := int(value/time.Minute) % 60
+	if value < time.Minute {
+		return fmt.Sprintf("%d 秒", int(value/time.Second))
+	}
+	if days > 0 {
+		return fmt.Sprintf("%d 天 %d 小时", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%d 小时 %d 分钟", hours, minutes)
+	}
+	return fmt.Sprintf("%d 分钟", minutes)
 }
 
 func dataSourceCheckDetail(snapshot runtimeHealthSnapshot, healthy bool) string {

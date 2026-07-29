@@ -59,6 +59,8 @@ type QueueConfig struct {
 	Stream                string `yaml:"stream"`
 	Subject               string `yaml:"subject"`
 	Durable               string `yaml:"durable"`
+	ExpectedWorkers       int    `yaml:"expected_workers"`
+	WorkerHeartbeatSecond int    `yaml:"worker_heartbeat_seconds"`
 	BatchSize             int    `yaml:"batch_size"`
 	MaxInflightBatches    int    `yaml:"max_inflight_batches"`
 	WorkerConcurrency     int    `yaml:"worker_concurrency"`
@@ -772,6 +774,21 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Queue.Durable == "" {
 		cfg.Queue.Durable = "eew-push-workers"
+	}
+	if cfg.Queue.ExpectedWorkers < 0 {
+		cfg.Queue.ExpectedWorkers = 0
+	}
+	if cfg.Queue.ExpectedWorkers > 64 {
+		cfg.Queue.ExpectedWorkers = 64
+	}
+	if cfg.Queue.WorkerHeartbeatSecond <= 0 {
+		cfg.Queue.WorkerHeartbeatSecond = 10
+	}
+	if cfg.Queue.WorkerHeartbeatSecond < 5 {
+		cfg.Queue.WorkerHeartbeatSecond = 5
+	}
+	if cfg.Queue.WorkerHeartbeatSecond > 60 {
+		cfg.Queue.WorkerHeartbeatSecond = 60
 	}
 	if cfg.Queue.BatchSize <= 0 {
 		cfg.Queue.BatchSize = 500

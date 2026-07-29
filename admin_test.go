@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,11 @@ func TestAdminLoginUsesSignedHTTPOnlySession(t *testing.T) {
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
 	}
+	unauthorizedServices := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedServices, httptest.NewRequest(http.MethodGet, "/api/admin/services", nil))
+	if unauthorizedServices.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized services status=%d body=%s", unauthorizedServices.Code, unauthorizedServices.Body.String())
+	}
 
 	badBody := []byte(`{"username":"saevio","password":"wrong"}`)
 	bad := httptest.NewRecorder()
@@ -110,6 +116,10 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`data-sort="updated_at"`,
 		`/api/admin/subscriptions/liveness`,
 		`id="audit-report-list"`,
+		`data-view="services"`,
+		`id="service-refresh-interval"`,
+		`/api/admin/services`,
+		`不发送任何通知`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("admin page is missing %q", required)
@@ -447,4 +457,93 @@ func TestAdminOverviewReportsRuntimeChecks(t *testing.T) {
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"data_source_healthy":true`) || !strings.Contains(recorder.Body.String(), `"checks"`) {
 		t.Fatalf("overview status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestAdminServiceMonitorUsesReadOnlyHealthProbes(t *testing.T) {
+	var requests atomic.Int32
+	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/ping" {
+			t.Fatalf("unexpected Bark health probe: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer bark.Close()
+
+	cfg := adminTestConfig(t)
+	cfg.Bark.Server = bark.URL
+	handler, _, health := adminTestHandler(t, cfg)
+	now := time.Now()
+	health.SetWebSocketConnected(now)
+	health.SetWebSocketMessage(now)
+
+	request := func() adminServiceHealthSnapshot {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/admin/services", nil, cfg))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("services status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Success bool                       `json:"success"`
+			Data    adminServiceHealthSnapshot `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if !response.Success {
+			t.Fatalf("service response failed: %s", recorder.Body.String())
+		}
+		return response.Data
+	}
+
+	first := request()
+	if !first.Healthy || first.Status != "healthy" || first.EnabledServices == 0 || first.HealthyServices != first.EnabledServices {
+		t.Fatalf("unexpected healthy service snapshot: %#v", first)
+	}
+	official, ok := findAdminService(first.Services, "official_bark")
+	if !ok || !official.Healthy || official.Metrics["notification_sent"] != false || official.LastSuccessAt == "" {
+		t.Fatalf("unexpected official Bark service: %#v", official)
+	}
+	second := request()
+	secondOfficial, _ := findAdminService(second.Services, "official_bark")
+	if secondOfficial.LastSuccessAt == "" || requests.Load() != 1 {
+		t.Fatalf("service monitor did not retain success/probe count: service=%#v requests=%d", secondOfficial, requests.Load())
+	}
+	if strings.Contains(recorderJSON(second), "notification_sent\":true") {
+		t.Fatal("read-only service monitor reported a notification send")
+	}
+}
+
+func TestAdminServiceMonitorReportsStaleEarthquakeSource(t *testing.T) {
+	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("pong")) }))
+	defer bark.Close()
+	cfg := adminTestConfig(t)
+	cfg.Bark.Server = bark.URL
+	store, err := NewStore(cfg.Server.DataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := &RuntimeHealth{}
+	health.SetWebSocketConnected(time.Now().Add(-10 * time.Minute))
+	health.SetWebSocketMessage(time.Now().Add(-10 * time.Minute))
+	monitor := newAdminServiceMonitor(cfg, store, NewNotifier(cfg.Bark), health)
+	snapshot := monitor.Snapshot(context.Background())
+	dataSource, ok := findAdminService(snapshot.Services, "earthquake_source")
+	if snapshot.Healthy || snapshot.Status != "unhealthy" || !ok || dataSource.Status != "unhealthy" {
+		t.Fatalf("stale data source was not surfaced: snapshot=%#v service=%#v", snapshot, dataSource)
+	}
+}
+
+func findAdminService(services []adminServiceStatus, id string) (adminServiceStatus, bool) {
+	for _, service := range services {
+		if service.ID == id {
+			return service, true
+		}
+	}
+	return adminServiceStatus{}, false
+}
+
+func recorderJSON(value any) string {
+	data, _ := json.Marshal(value)
+	return string(data)
 }

@@ -156,6 +156,7 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 - 对选中订阅或当前筛选结果只读测活，比对自建 Bark 设备库且不触发 Bark/APNs 消息；
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
+- 在独立“服务监控”页面自动刷新应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
 
 管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
 
@@ -272,6 +273,14 @@ Bark 官方服务器正常使用没有固定次数限制，但异常使用会触
 自建 Bark Server 不套用官方错误预算和官方 BAN 规则。网络错误、429、5xx，以及旧版 Bark 错误返回中明确的临时数据库饱和会被识别为临时错误。queue worker 会在 JetStream 消息保持未 ACK 的状态下逐目标抖动退避重试；404、BadDeviceToken 等永久错误不重试。实际速度仍取决于自建 Bark Server、APNs 和网络情况；高烈度订阅会优先进入各自服务器分组的并发队列。
 
 扩展架构支持四部分：PostgreSQL 保存订阅并通过 `earthdistance` GiST 索引筛选震中附近候选地址；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。任务 ACK 只在 worker 完成逐目标临时错误重试并返回最终批次结果后提交，通知 ID 由事件确定性生成，用于降低重投造成重复通知的概率。
+
+队列 Worker 每隔 `queue.worker_heartbeat_seconds` 秒向独立的 NATS 核心主题发布一次只包含实例 ID、启动时间、并发数和累计处理量的心跳。管理员服务监控按 `queue.expected_workers` 判断缺失或过期心跳；心跳不进入 JetStream 任务流、不包含 Bark Key，也不会触发推送。项目提供的双 Worker Compose 建议配置：
+
+```yaml
+queue:
+  expected_workers: 2
+  worker_heartbeat_seconds: 10
+```
 
 仓库内的 `bark-server-patch/` 从固定的 Bark v2.3.5 commit 构建加固镜像。它增加有界 MySQL 连接池、设备 Token 读穿缓存、正确的 404/503 错误分类和进程级 APNs 在途上限。`ops/docker-compose.scale.yml` 已集成该镜像；连接池和缓存参数见 [bark-server-patch/README.md](bark-server-patch/README.md)。
 

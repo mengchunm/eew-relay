@@ -92,3 +92,35 @@ func TestQueuedRetryDelayIsDeterministicAndBounded(t *testing.T) {
 		t.Fatalf("retry delay outside expected capped jitter range: %s", first)
 	}
 }
+
+func TestQueueWorkerHealthDetectsMissingAndStaleWorkers(t *testing.T) {
+	now := time.Now()
+	client := &PushQueueClient{
+		cfg: QueueConfig{ExpectedWorkers: 2, WorkerHeartbeatSecond: 5},
+		workers: map[string]queueWorkerObservation{
+			"worker-a": {Heartbeat: queueWorkerHeartbeat{ID: "worker-a", StartedAt: now.Add(-time.Hour), Concurrency: 500, Batches: 3, Targets: 1200}, Received: now.Add(-2 * time.Second)},
+			"worker-b": {Heartbeat: queueWorkerHeartbeat{ID: "worker-b", StartedAt: now.Add(-time.Hour), Concurrency: 500}, Received: now.Add(-time.Minute)},
+		},
+	}
+	workers, expected, staleAfter := client.workerHealth(now)
+	if expected != 2 || staleAfter != 20*time.Second || len(workers) != 2 || !workers[0].Active || workers[1].Active {
+		t.Fatalf("unexpected worker health: workers=%#v expected=%d stale=%s", workers, expected, staleAfter)
+	}
+	monitor := &adminServiceMonitor{notifier: &Notifier{queue: client}}
+	result := monitor.probePushWorkers(context.Background())
+	if result.Status != "degraded" || result.Metrics["active"] != 1 || result.Metrics["expected"] != 2 {
+		t.Fatalf("missing worker was not degraded: %#v", result)
+	}
+}
+
+func TestQueueWorkerHeartbeatContainsOnlyOperationalMetadata(t *testing.T) {
+	runtime := newQueueWorkerRuntime(QueueConfig{WorkerConcurrency: 500})
+	runtime.batches.Store(4)
+	runtime.targets.Store(1500)
+	runtime.failedTargets.Store(2)
+	runtime.lastBatchUnix.Store(time.Now().Unix())
+	heartbeat := runtime.heartbeat()
+	if heartbeat.ID == "" || heartbeat.SentAt.IsZero() || heartbeat.StartedAt.IsZero() || heartbeat.Concurrency != 500 || heartbeat.Batches != 4 || heartbeat.Targets != 1500 || heartbeat.FailedTargets != 2 || heartbeat.LastBatchAt.IsZero() {
+		t.Fatalf("unexpected worker heartbeat: %#v", heartbeat)
+	}
+}

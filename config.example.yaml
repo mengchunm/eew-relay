@@ -145,6 +145,10 @@ queue:
   stream: "EEW_PUSH"
   subject: "eew.push.task"
   durable: "eew-push-workers"
+  # Used by the read-only admin service monitor. Workers publish operational
+  # heartbeats over NATS; no Bark notification is sent by this check.
+  expected_workers: 2
+  worker_heartbeat_seconds: 10
   batch_size: 500
   max_inflight_batches: 8
   worker_concurrency: 400

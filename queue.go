@@ -4,19 +4,68 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
+	"os"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 )
 
 type PushQueueClient struct {
-	cfg QueueConfig
-	nc  *nats.Conn
-	js  nats.JetStreamContext
+	cfg             QueueConfig
+	nc              *nats.Conn
+	js              nats.JetStreamContext
+	workerMu        sync.RWMutex
+	workers         map[string]queueWorkerObservation
+	workerHeartbeat *nats.Subscription
+}
+
+type queueWorkerHeartbeat struct {
+	ID            string    `json:"id"`
+	StartedAt     time.Time `json:"started_at"`
+	SentAt        time.Time `json:"sent_at"`
+	GoVersion     string    `json:"go_version"`
+	Concurrency   int       `json:"concurrency"`
+	Batches       int64     `json:"batches"`
+	Targets       int64     `json:"targets"`
+	FailedTargets int64     `json:"failed_targets"`
+	LastBatchAt   time.Time `json:"last_batch_at,omitempty"`
+}
+
+type queueWorkerObservation struct {
+	Heartbeat queueWorkerHeartbeat
+	Received  time.Time
+}
+
+type queueWorkerHealth struct {
+	ID            string `json:"id"`
+	Active        bool   `json:"active"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastSeenAt    string `json:"last_seen_at,omitempty"`
+	LastSeenAge   int64  `json:"last_seen_age_seconds"`
+	LastBatchAt   string `json:"last_batch_at,omitempty"`
+	GoVersion     string `json:"go_version,omitempty"`
+	Concurrency   int    `json:"concurrency"`
+	Batches       int64  `json:"batches"`
+	Targets       int64  `json:"targets"`
+	FailedTargets int64  `json:"failed_targets"`
+}
+
+type queueWorkerRuntime struct {
+	id            string
+	startedAt     time.Time
+	concurrency   int
+	batches       atomic.Int64
+	targets       atomic.Int64
+	failedTargets atomic.Int64
+	lastBatchUnix atomic.Int64
 }
 
 func NewPushQueueClient(cfg QueueConfig) (*PushQueueClient, error) {
@@ -27,7 +76,12 @@ func NewPushQueueClient(cfg QueueConfig) (*PushQueueClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PushQueueClient{cfg: cfg, nc: nc, js: js}, nil
+	client := &PushQueueClient{cfg: cfg, nc: nc, js: js, workers: make(map[string]queueWorkerObservation)}
+	if err := client.startWorkerHeartbeatMonitor(); err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("subscribe to queue worker heartbeats: %w", err)
+	}
+	return client, nil
 }
 
 func connectPushQueue(cfg QueueConfig, name string) (*nats.Conn, nats.JetStreamContext, error) {
@@ -76,8 +130,159 @@ func (c *PushQueueClient) Close() {
 	if c == nil || c.nc == nil {
 		return
 	}
+	if c.workerHeartbeat != nil {
+		_ = c.workerHeartbeat.Unsubscribe()
+	}
 	_ = c.nc.Drain()
 	c.nc.Close()
+}
+
+func queueWorkerHeartbeatSubject(cfg QueueConfig) string {
+	subject := strings.Trim(strings.TrimSpace(cfg.Subject), ".")
+	if subject == "" {
+		subject = "eew.push.task"
+	}
+	return subject + ".worker-heartbeat"
+}
+
+func (c *PushQueueClient) startWorkerHeartbeatMonitor() error {
+	if c == nil || c.nc == nil {
+		return nil
+	}
+	subscription, err := c.nc.Subscribe(queueWorkerHeartbeatSubject(c.cfg), func(msg *nats.Msg) {
+		var heartbeat queueWorkerHeartbeat
+		if json.Unmarshal(msg.Data, &heartbeat) != nil {
+			return
+		}
+		heartbeat.ID = strings.TrimSpace(heartbeat.ID)
+		if heartbeat.ID == "" || len(heartbeat.ID) > 80 || heartbeat.Concurrency < 0 {
+			return
+		}
+		now := time.Now()
+		if heartbeat.SentAt.After(now.Add(5 * time.Minute)) {
+			return
+		}
+		c.workerMu.Lock()
+		c.workers[heartbeat.ID] = queueWorkerObservation{Heartbeat: heartbeat, Received: now}
+		c.workerMu.Unlock()
+	})
+	if err != nil {
+		return err
+	}
+	c.workerHeartbeat = subscription
+	return c.nc.FlushTimeout(2 * time.Second)
+}
+
+func (c *PushQueueClient) workerHealth(now time.Time) ([]queueWorkerHealth, int, time.Duration) {
+	if c == nil {
+		return nil, 0, 0
+	}
+	heartbeatEvery := time.Duration(c.cfg.WorkerHeartbeatSecond) * time.Second
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = 10 * time.Second
+	}
+	staleAfter := 3*heartbeatEvery + 5*time.Second
+	c.workerMu.RLock()
+	observations := make([]queueWorkerObservation, 0, len(c.workers))
+	for _, observation := range c.workers {
+		observations = append(observations, observation)
+	}
+	c.workerMu.RUnlock()
+	workers := make([]queueWorkerHealth, 0, len(observations))
+	for _, observation := range observations {
+		age := now.Sub(observation.Received)
+		if age < 0 {
+			age = 0
+		}
+		if age > 10*staleAfter {
+			continue
+		}
+		heartbeat := observation.Heartbeat
+		worker := queueWorkerHealth{
+			ID:            heartbeat.ID,
+			Active:        age <= staleAfter,
+			LastSeenAt:    observation.Received.UTC().Format(time.RFC3339),
+			LastSeenAge:   int64(age.Seconds()),
+			GoVersion:     heartbeat.GoVersion,
+			Concurrency:   heartbeat.Concurrency,
+			Batches:       heartbeat.Batches,
+			Targets:       heartbeat.Targets,
+			FailedTargets: heartbeat.FailedTargets,
+		}
+		if !heartbeat.StartedAt.IsZero() {
+			worker.StartedAt = heartbeat.StartedAt.UTC().Format(time.RFC3339)
+		}
+		if !heartbeat.LastBatchAt.IsZero() {
+			worker.LastBatchAt = heartbeat.LastBatchAt.UTC().Format(time.RFC3339)
+		}
+		workers = append(workers, worker)
+	}
+	sort.Slice(workers, func(i, j int) bool { return workers[i].ID < workers[j].ID })
+	expected := c.cfg.ExpectedWorkers
+	if expected <= 0 {
+		expected = len(workers)
+		if expected == 0 {
+			expected = 1
+		}
+	}
+	return workers, expected, staleAfter
+}
+
+func newQueueWorkerRuntime(cfg QueueConfig) *queueWorkerRuntime {
+	id, err := os.Hostname()
+	if err != nil || strings.TrimSpace(id) == "" {
+		id = fmt.Sprintf("worker-%d", os.Getpid())
+	}
+	id = strings.TrimSpace(id)
+	if len(id) > 32 {
+		id = id[:32]
+	}
+	return &queueWorkerRuntime{id: id, startedAt: time.Now().UTC(), concurrency: cfg.WorkerConcurrency}
+}
+
+func (r *queueWorkerRuntime) heartbeat() queueWorkerHeartbeat {
+	heartbeat := queueWorkerHeartbeat{
+		ID:            r.id,
+		StartedAt:     r.startedAt,
+		SentAt:        time.Now().UTC(),
+		GoVersion:     runtime.Version(),
+		Concurrency:   r.concurrency,
+		Batches:       r.batches.Load(),
+		Targets:       r.targets.Load(),
+		FailedTargets: r.failedTargets.Load(),
+	}
+	if unix := r.lastBatchUnix.Load(); unix > 0 {
+		heartbeat.LastBatchAt = time.Unix(unix, 0).UTC()
+	}
+	return heartbeat
+}
+
+func publishQueueWorkerHeartbeat(nc *nats.Conn, cfg QueueConfig, worker *queueWorkerRuntime) {
+	if nc == nil || worker == nil {
+		return
+	}
+	data, err := json.Marshal(worker.heartbeat())
+	if err == nil {
+		_ = nc.Publish(queueWorkerHeartbeatSubject(cfg), data)
+	}
+}
+
+func maintainQueueWorkerHeartbeat(ctx context.Context, nc *nats.Conn, cfg QueueConfig, worker *queueWorkerRuntime) {
+	every := time.Duration(cfg.WorkerHeartbeatSecond) * time.Second
+	if every <= 0 {
+		every = 10 * time.Second
+	}
+	publishQueueWorkerHeartbeat(nc, cfg, worker)
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			publishQueueWorkerHeartbeat(nc, cfg, worker)
+		}
+	}
 }
 
 func sendFanoutQueueGroup(ctx context.Context, notifier *Notifier, event Event, targets []fanoutTarget, out chan<- fanoutResult) {
@@ -311,6 +516,7 @@ func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) e
 		return err
 	}
 	defer nc.Close()
+	workerRuntime := newQueueWorkerRuntime(cfg.Queue)
 	sem := make(chan struct{}, cfg.Queue.WorkerConcurrency)
 	handler := func(msg *nats.Msg) {
 		var payload relayFanoutRequest
@@ -320,6 +526,14 @@ func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) e
 		}
 		started := time.Now()
 		response := processQueuedFanout(ctx, notifier, payload, sem, cfg.Queue)
+		workerRuntime.batches.Add(1)
+		workerRuntime.targets.Add(int64(len(payload.Targets)))
+		for _, result := range response.Results {
+			if !result.Pushed {
+				workerRuntime.failedTargets.Add(1)
+			}
+		}
+		workerRuntime.lastBatchUnix.Store(time.Now().Unix())
 		log.Printf("push queue batch processed id=%s targets=%d duration=%s", payload.ID, len(payload.Targets), time.Since(started))
 		data, err := json.Marshal(response)
 		if err != nil {
@@ -342,6 +556,7 @@ func servePushQueueWorker(ctx context.Context, cfg Config, notifier *Notifier) e
 	if err != nil {
 		return err
 	}
+	go maintainQueueWorkerHeartbeat(ctx, nc, cfg.Queue, workerRuntime)
 	log.Printf("push queue worker subject=%s durable=%s concurrency=%d retry_attempts=%d retry_window=%ds",
 		cfg.Queue.Subject, cfg.Queue.Durable, cfg.Queue.WorkerConcurrency, cfg.Queue.RetryAttempts, cfg.Queue.RetryWindowSeconds)
 	<-ctx.Done()
