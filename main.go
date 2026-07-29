@@ -254,6 +254,7 @@ var beijingTZ = time.FixedZone("Asia/Shanghai", 8*3600)
 
 const notificationOpenEndedMax = 99
 const officialReportURL = "https://data.earthquake.cn/datashare/report.shtml?PAGEID=earthquake_subao"
+const officialJMAQuakeListURL = "https://www.jma.go.jp/bosai/quake/data/list.json"
 const projectUserAgent = "eew-relay/1.0 (+https://github.com/mengchunm/eew-relay)"
 const defaultSelfHostedFanoutConcurrency = 750
 const maxSelfHostedFanoutConcurrency = 1000
@@ -5083,10 +5084,129 @@ func fetchWolfxHistory(ctx context.Context) ([]HistoryRecord, error) {
 			}
 		}
 	}
+	officialJMA, err := fetchOfficialJMAHistory(ctx, client)
+	if err != nil {
+		fetchErrors = append(fetchErrors, "jma official: "+err.Error())
+	} else {
+		records = mergeHistoryRecords(officialJMA, records)
+	}
 	if len(records) == 0 && len(fetchErrors) > 0 {
 		return nil, errors.New(strings.Join(fetchErrors, "; "))
 	}
 	return records, nil
+}
+
+type officialJMAQuakeListItem struct {
+	EventID      string `json:"eid"`
+	OriginTime   string `json:"at"`
+	Hypocenter   string `json:"anm"`
+	Coordinates  string `json:"cod"`
+	Magnitude    string `json:"mag"`
+	MaxIntensity string `json:"maxi"`
+}
+
+var officialJMACoordinateRe = regexp.MustCompile(`^([+-][0-9]+(?:\.[0-9]+)?)([+-][0-9]+(?:\.[0-9]+)?)([+-][0-9]+)?/`)
+
+func fetchOfficialJMAHistory(ctx context.Context, client *http.Client) ([]HistoryRecord, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, officialJMAQuakeListURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", projectUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	return parseOfficialJMAHistory(body)
+}
+
+func parseOfficialJMAHistory(data []byte) ([]HistoryRecord, error) {
+	var items []officialJMAQuakeListItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+	records := make([]HistoryRecord, 0, len(items))
+	indexByEventID := make(map[string]int)
+	for _, item := range items {
+		eventID := strings.TrimSpace(item.EventID)
+		if eventID == "" {
+			continue
+		}
+		latitude, longitude, depthKM, coordinatesOK := parseOfficialJMACoordinates(item.Coordinates)
+		magnitude, _ := strconv.ParseFloat(strings.TrimSpace(item.Magnitude), 64)
+		candidate := HistoryRecord{
+			Source:       "jma",
+			Key:          "official-" + eventID,
+			EventID:      eventID,
+			OriginTime:   strings.TrimSpace(item.OriginTime),
+			Hypocenter:   strings.TrimSpace(item.Hypocenter),
+			Latitude:     latitude,
+			Longitude:    longitude,
+			Magnitude:    magnitude,
+			DepthKM:      depthKM,
+			MaxIntensity: strings.TrimSpace(item.MaxIntensity),
+		}
+		if index, exists := indexByEventID[eventID]; exists {
+			mergeHistoryRecordDetails(&records[index], candidate)
+			continue
+		}
+		if !coordinatesOK || !validSubscriptionCoordinate(latitude, longitude) || magnitude <= 0 {
+			continue
+		}
+		indexByEventID[eventID] = len(records)
+		records = append(records, candidate)
+	}
+	return records, nil
+}
+
+func parseOfficialJMACoordinates(value string) (float64, float64, float64, bool) {
+	match := officialJMACoordinateRe.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) == 0 {
+		return 0, 0, 0, false
+	}
+	latitude, latErr := strconv.ParseFloat(match[1], 64)
+	longitude, lonErr := strconv.ParseFloat(match[2], 64)
+	if latErr != nil || lonErr != nil {
+		return 0, 0, 0, false
+	}
+	depthKM := 0.0
+	if len(match) > 3 && match[3] != "" {
+		depthMeters, err := strconv.ParseFloat(match[3], 64)
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		depthKM = math.Abs(depthMeters) / 1000
+	}
+	return latitude, longitude, depthKM, true
+}
+
+func mergeHistoryRecordDetails(target *HistoryRecord, candidate HistoryRecord) {
+	if target.OriginTime == "" {
+		target.OriginTime = candidate.OriginTime
+	}
+	if target.Hypocenter == "" {
+		target.Hypocenter = candidate.Hypocenter
+	}
+	if target.Latitude == 0 && target.Longitude == 0 {
+		target.Latitude, target.Longitude = candidate.Latitude, candidate.Longitude
+	}
+	if target.Magnitude == 0 {
+		target.Magnitude = candidate.Magnitude
+	}
+	if target.DepthKM == 0 {
+		target.DepthKM = candidate.DepthKM
+	}
+	if target.MaxIntensity == "" {
+		target.MaxIntensity = candidate.MaxIntensity
+	}
 }
 
 var (
@@ -5279,10 +5399,7 @@ func mergeHistoryRecords(groups ...[]HistoryRecord) []HistoryRecord {
 	merged := []HistoryRecord{}
 	for _, records := range groups {
 		for _, record := range records {
-			key := strings.ToLower(record.Source) + ":" + record.Key
-			if key == ":" {
-				key = strings.ToLower(record.EventID)
-			}
+			key := historyRecordIdentity(record)
 			if key == "" || seen[key] {
 				continue
 			}
@@ -5291,6 +5408,22 @@ func mergeHistoryRecords(groups ...[]HistoryRecord) []HistoryRecord {
 		}
 	}
 	return merged
+}
+
+func historyRecordIdentity(record HistoryRecord) string {
+	source := strings.ToLower(strings.TrimSpace(record.Source))
+	eventID := strings.ToLower(strings.TrimSpace(record.EventID))
+	key := strings.ToLower(strings.TrimSpace(record.Key))
+	if eventID != "" && eventID != source+"-"+key {
+		return source + ":event:" + eventID
+	}
+	if key != "" {
+		return source + ":key:" + key
+	}
+	if eventID != "" {
+		return source + ":event:" + eventID
+	}
+	return ""
 }
 
 func filterHistoryRecords(records []HistoryRecord, values url.Values) []HistoryRecord {

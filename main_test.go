@@ -293,6 +293,24 @@ func TestHistoryRecordFromRaw(t *testing.T) {
 	}
 }
 
+func TestParseOfficialJMAHistoryCombinesEventDetails(t *testing.T) {
+	data := []byte(`[
+		{"eid":"20260729155938","at":"2026-07-29T14:59:00+08:00","anm":"熊本県阿蘇地方","cod":"+32.9+131.0-10000/","mag":"3.9","maxi":""},
+		{"eid":"20260729155938","at":"2026-07-29T14:59:00+08:00","anm":"","cod":"","mag":"","maxi":"3"}
+	]`)
+	records, err := parseOfficialJMAHistory(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one combined JMA event, got %#v", records)
+	}
+	record := records[0]
+	if record.Source != "jma" || record.EventID != "20260729155938" || record.Hypocenter != "熊本県阿蘇地方" || record.Latitude != 32.9 || record.Longitude != 131 || record.DepthKM != 10 || record.Magnitude != 3.9 || record.MaxIntensity != "3" {
+		t.Fatalf("unexpected official JMA event: %#v", record)
+	}
+}
+
 func TestSimulationAndHistoryPreviewsUseSubscriberLocation(t *testing.T) {
 	cfg := Config{Alert: AlertConfig{SWaveKMS: 3.5, PWaveKMS: 6.0}}
 	sub := Subscription{Latitude: 31.2304, Longitude: 121.4737}
@@ -2435,12 +2453,13 @@ func TestParseOfficialReports(t *testing.T) {
 	}
 }
 
-func TestMergeHistoryRecordsDedupes(t *testing.T) {
+func TestMergeHistoryRecordsUsesStableEventIdentity(t *testing.T) {
 	a := HistoryRecord{Source: "cenc", Key: "No1", EventID: "a", Magnitude: 4}
 	b := HistoryRecord{Source: "cenc", Key: "No1", EventID: "b", Magnitude: 5}
+	duplicateA := HistoryRecord{Source: "cenc", Key: "No9", EventID: "a", Magnitude: 4.1}
 	c := HistoryRecord{Source: "major", Key: "wenchuan-2008", EventID: "c", Magnitude: 7.9}
-	merged := mergeHistoryRecords([]HistoryRecord{a, c}, []HistoryRecord{b})
-	if len(merged) != 2 {
+	merged := mergeHistoryRecords([]HistoryRecord{a, c}, []HistoryRecord{b, duplicateA})
+	if len(merged) != 3 {
 		t.Fatalf("expected deduped records, got %#v", merged)
 	}
 	if merged[0].EventID != "a" {
