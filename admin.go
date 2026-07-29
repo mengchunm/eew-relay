@@ -140,11 +140,12 @@ type adminBatchDeleteRequest struct {
 }
 
 type adminSubscriptionFilter struct {
-	Query       string `json:"q"`
-	Server      string `json:"server"`
-	NotifyLevel string `json:"notify_level"`
-	CreatedFrom string `json:"created_from"`
-	CreatedTo   string `json:"created_to"`
+	Query          string `json:"q"`
+	Server         string `json:"server"`
+	NotifyLevel    string `json:"notify_level"`
+	LivenessStatus string `json:"liveness_status"`
+	CreatedFrom    string `json:"created_from"`
+	CreatedTo      string `json:"created_to"`
 }
 
 type adminSubscriptionLivenessRequest struct {
@@ -157,11 +158,19 @@ type adminTestRequest struct {
 	Kind   string `json:"kind"`
 }
 
-type adminSubscriptionLivenessIssue struct {
+type adminSubscriptionLivenessResult struct {
 	BarkID     string `json:"bark_id"`
 	BarkServer string `json:"bark_server"`
 	Status     string `json:"status"`
 	Message    string `json:"message"`
+}
+
+type adminSubscriptionItem struct {
+	Subscription
+	LivenessStatus    string `json:"liveness_status"`
+	LivenessLabel     string `json:"liveness_label"`
+	LivenessCheckedAt string `json:"liveness_checked_at,omitempty"`
+	LivenessMessage   string `json:"liveness_message,omitempty"`
 }
 
 func newAdminAuth(cfg ServerConfig) *adminAuth {
@@ -433,16 +442,17 @@ func parseAdminPage(r *http.Request, defaultLimit, maxLimit int) (int, int) {
 
 func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
 	filter := adminSubscriptionFilter{
-		Query:       r.URL.Query().Get("q"),
-		Server:      r.URL.Query().Get("server"),
-		NotifyLevel: r.URL.Query().Get("notify_level"),
-		CreatedFrom: r.URL.Query().Get("created_from"),
-		CreatedTo:   r.URL.Query().Get("created_to"),
+		Query:          r.URL.Query().Get("q"),
+		Server:         r.URL.Query().Get("server"),
+		NotifyLevel:    r.URL.Query().Get("notify_level"),
+		LivenessStatus: r.URL.Query().Get("liveness_status"),
+		CreatedFrom:    r.URL.Query().Get("created_from"),
+		CreatedTo:      r.URL.Query().Get("created_to"),
 	}
 	sortBy, sortOrder := normalizeAdminSubscriptionSort(r.URL.Query().Get("sort_by"), r.URL.Query().Get("sort_order"))
 	offset, limit := parseAdminPage(r, 50, 200)
 	filtered := filterAdminSubscriptions(cfg, store.List(), filter)
-	sortAdminSubscriptions(filtered, sortBy, sortOrder)
+	sortAdminSubscriptions(cfg, filtered, sortBy, sortOrder)
 	total := len(filtered)
 	if offset > total {
 		offset = total
@@ -451,8 +461,19 @@ func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, cfg Config,
 	if end > total {
 		end = total
 	}
+	items := make([]adminSubscriptionItem, 0, end-offset)
+	for _, sub := range filtered[offset:end] {
+		record := subscriptionLivenessRecordFor(cfg, sub)
+		items = append(items, adminSubscriptionItem{
+			Subscription:      sub,
+			LivenessStatus:    record.Status,
+			LivenessLabel:     subscriptionLivenessStatusLabel(record.Status),
+			LivenessCheckedAt: record.CheckedAt,
+			LivenessMessage:   record.Message,
+		})
+	}
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
-		"items": filtered[offset:end], "total": total, "offset": offset, "limit": limit, "sort_by": sortBy, "sort_order": sortOrder,
+		"items": items, "total": total, "offset": offset, "limit": limit, "sort_by": sortBy, "sort_order": sortOrder,
 	}})
 }
 
@@ -462,6 +483,10 @@ func filterAdminSubscriptions(cfg Config, subscriptions []Subscription, filter a
 	levelFilter := ""
 	if requestedLevel := strings.TrimSpace(filter.NotifyLevel); validNotifyLevel(requestedLevel) {
 		levelFilter = normalizeNotifyLevel(requestedLevel)
+	}
+	livenessFilter := strings.TrimSpace(filter.LivenessStatus)
+	if livenessFilter != subscriptionLivenessUntested && !validSubscriptionLivenessStatus(livenessFilter) {
+		livenessFilter = ""
 	}
 	createdFrom, createdFromOK := parseAdminFilterDate(filter.CreatedFrom, false)
 	createdTo, createdToOK := parseAdminFilterDate(filter.CreatedTo, true)
@@ -483,6 +508,9 @@ func filterAdminSubscriptions(cfg Config, subscriptions []Subscription, filter a
 		if levelFilter != "" && !adminSubscriptionHasLevel(sub, levelFilter) {
 			continue
 		}
+		if livenessFilter != "" && subscriptionLivenessRecordFor(cfg, sub).Status != livenessFilter {
+			continue
+		}
 		createdAt := time.UnixMilli(sub.CreatedAt)
 		if createdFromOK && createdAt.Before(createdFrom) {
 			continue
@@ -498,7 +526,7 @@ func filterAdminSubscriptions(cfg Config, subscriptions []Subscription, filter a
 func normalizeAdminSubscriptionSort(sortBy, sortOrder string) (string, string) {
 	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
 	switch sortBy {
-	case "bark_id", "server", "location", "notify_level", "updated_at":
+	case "bark_id", "server", "location", "notify_level", "liveness_status", "updated_at":
 	default:
 		sortBy = "updated_at"
 	}
@@ -513,9 +541,9 @@ func normalizeAdminSubscriptionSort(sortBy, sortOrder string) (string, string) {
 	return sortBy, sortOrder
 }
 
-func sortAdminSubscriptions(subscriptions []Subscription, sortBy, sortOrder string) {
+func sortAdminSubscriptions(cfg Config, subscriptions []Subscription, sortBy, sortOrder string) {
 	sort.SliceStable(subscriptions, func(i, j int) bool {
-		comparison := compareAdminSubscriptions(subscriptions[i], subscriptions[j], sortBy)
+		comparison := compareAdminSubscriptions(cfg, subscriptions[i], subscriptions[j], sortBy)
 		if comparison == 0 {
 			comparison = strings.Compare(strings.ToLower(subscriptions[i].BarkID), strings.ToLower(subscriptions[j].BarkID))
 		}
@@ -526,7 +554,7 @@ func sortAdminSubscriptions(subscriptions []Subscription, sortBy, sortOrder stri
 	})
 }
 
-func compareAdminSubscriptions(left, right Subscription, sortBy string) int {
+func compareAdminSubscriptions(cfg Config, left, right Subscription, sortBy string) int {
 	switch sortBy {
 	case "bark_id":
 		return strings.Compare(strings.ToLower(left.BarkID), strings.ToLower(right.BarkID))
@@ -536,6 +564,8 @@ func compareAdminSubscriptions(left, right Subscription, sortBy string) int {
 		return strings.Compare(adminSubscriptionLocationSortKey(left), adminSubscriptionLocationSortKey(right))
 	case "notify_level":
 		return strings.Compare(adminSubscriptionNotifySortKey(left), adminSubscriptionNotifySortKey(right))
+	case "liveness_status":
+		return strings.Compare(subscriptionLivenessRecordFor(cfg, left).Status, subscriptionLivenessRecordFor(cfg, right).Status)
 	default:
 		if left.UpdatedAt < right.UpdatedAt {
 			return -1
@@ -749,6 +779,7 @@ func serveAdminDeleteSubscriptions(w http.ResponseWriter, r *http.Request, store
 
 func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
 	startedAt := time.Now()
+	checkedAt := time.Now()
 	var request adminSubscriptionLivenessRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
 	decoder.DisallowUnknownFields()
@@ -782,30 +813,56 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 	selfHostedMissing := 0
 	officialNotChecked := 0
 	invalid := 0
-	issues := make([]adminSubscriptionLivenessIssue, 0)
-	issueTotal := 0
-	appendIssue := func(issue adminSubscriptionLivenessIssue) {
-		issueTotal++
-		if len(issues) < 500 {
-			issues = append(issues, issue)
+	results := make([]adminSubscriptionLivenessResult, 0, len(subscriptions))
+	issues := make([]adminSubscriptionLivenessResult, 0)
+	records := make(map[string]SubscriptionLivenessRecord, len(subscriptions))
+	statusCounts := map[string]int{
+		subscriptionLivenessDevicePresent:        0,
+		subscriptionLivenessDeviceMissing:        0,
+		subscriptionLivenessConfigurationInvalid: 0,
+		subscriptionLivenessOfficialUnverified:   0,
+	}
+	appendResult := func(sub Subscription, status, message string) {
+		result := adminSubscriptionLivenessResult{BarkID: sub.BarkID, BarkServer: sub.BarkServer, Status: status, Message: message}
+		results = append(results, result)
+		records[sub.BarkID] = SubscriptionLivenessRecord{Status: status, Message: message}
+		statusCounts[status]++
+		if status == subscriptionLivenessDeviceMissing || status == subscriptionLivenessConfigurationInvalid {
+			issues = append(issues, result)
 		}
 	}
 	for _, sub := range subscriptions {
+		if !isAllowedBarkServer(sub.BarkServer, cfg) {
+			invalid++
+			appendResult(sub, subscriptionLivenessConfigurationInvalid, "Bark 服务器不受支持")
+			continue
+		}
 		if err := validateSubscription(sub); err != nil {
 			invalid++
-			appendIssue(adminSubscriptionLivenessIssue{BarkID: sub.BarkID, BarkServer: sub.BarkServer, Status: "invalid_subscription", Message: err.Error()})
+			appendResult(sub, subscriptionLivenessConfigurationInvalid, err.Error())
 			continue
 		}
 		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
 			if _, ok := deviceKeys[sub.BarkID]; ok {
 				selfHostedAlive++
+				appendResult(sub, subscriptionLivenessDevicePresent, "自建 Bark 设备库中存在该 Key")
 			} else {
 				selfHostedMissing++
-				appendIssue(adminSubscriptionLivenessIssue{BarkID: sub.BarkID, BarkServer: sub.BarkServer, Status: "missing_device", Message: "自建 Bark 设备库中不存在该 Key"})
+				appendResult(sub, subscriptionLivenessDeviceMissing, "自建 Bark 设备库中不存在该 Key")
 			}
 			continue
 		}
 		officialNotChecked++
+		appendResult(sub, subscriptionLivenessOfficialUnverified, "官方 Bark 不提供无推送 Key 校验接口")
+	}
+	if cfg.subscriptionLiveness == nil {
+		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "订阅测活标签尚未初始化"})
+		return
+	}
+	if err := cfg.subscriptionLiveness.Update(records, store.List(), checkedAt); err != nil {
+		log.Printf("save subscription liveness labels: %v", err)
+		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "测活完成，但保存订阅标签失败，结果未生效"})
+		return
 	}
 	healthy := selfHostedMissing == 0 && invalid == 0
 	log.Printf("admin subscription liveness scope=%s total=%d not_found=%d self_hosted=%d alive=%d missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
@@ -813,7 +870,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "无推送测活完成", Data: map[string]any{
 		"healthy":                    healthy,
 		"scope":                      scope,
-		"checked_at":                 time.Now().UTC().Format(time.RFC3339),
+		"checked_at":                 checkedAt.UTC().Format(time.RFC3339),
 		"duration_ms":                time.Since(startedAt).Milliseconds(),
 		"total_subscriptions":        len(subscriptions),
 		"self_hosted_total":          selfHostedTotal,
@@ -822,9 +879,13 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		"official_not_checked":       officialNotChecked,
 		"invalid_subscriptions":      invalid,
 		"device_keys":                len(deviceKeys),
-		"issue_total":                issueTotal,
+		"status_counts":              statusCounts,
+		"result_total":               len(results),
+		"results":                    results,
+		"labels_saved":               true,
+		"issue_total":                len(issues),
 		"issues":                     issues,
-		"issues_truncated":           issueTotal > len(issues),
+		"issues_truncated":           false,
 		"notification_sent":          false,
 		"selected_not_found":         notFound,
 		"official_check_explanation": "官方 Bark 不提供无推送 Key 校验接口，因此仅统计、不发送测试消息。",

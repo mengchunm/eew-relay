@@ -114,12 +114,17 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`class="brand-logo" src="/eew-favicon.svg"`,
 		`id="subscription-server"`,
 		`id="subscription-level"`,
+		`id="subscription-liveness"`,
 		`id="subscription-created-from"`,
 		`id="run-liveness"`,
 		`id="run-liveness" class="btn btn-secondary">测活</button>`,
 		`data-sort="bark_id"`,
+		`data-sort="liveness_status"`,
 		`data-sort="updated_at"`,
 		`/api/admin/subscriptions/liveness`,
+		`id="liveness-result-filter"`,
+		`id="liveness-prev"`,
+		`官方未验证`,
 		`id="audit-report-list"`,
 		`data-view="services"`,
 		`id="service-history-range"`,
@@ -464,6 +469,12 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := store.Upsert(Subscription{BarkID: "official-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104, NotifyRules: defaultNotificationRules()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(Subscription{BarkID: "invalid-key", BarkServer: barkServer.URL, LocationName: "成都", Latitude: 30, Longitude: 104, NotifyRules: defaultNotificationRules(), NotifyBands: []NotificationBand{{Min: 2, Max: 2, Level: "active"}}}); err != nil {
+		t.Fatal(err)
+	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, adminRequest(http.MethodPost, "/api/admin/subscriptions/liveness", nil, cfg))
 	if recorder.Code != http.StatusOK {
@@ -473,9 +484,38 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		t.Fatalf("liveness unexpectedly sent %d HTTP push requests", pushRequests.Load())
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{`"self_hosted_alive":1`, `"self_hosted_missing":1`, `"notification_sent":false`, `"bark_id":"missing-key"`} {
+	for _, expected := range []string{`"total_subscriptions":4`, `"self_hosted_alive":1`, `"self_hosted_missing":1`, `"official_not_checked":1`, `"invalid_subscriptions":1`, `"result_total":4`, `"labels_saved":true`, `"notification_sent":false`, `"bark_id":"alive-key"`, `"bark_id":"missing-key"`, `"bark_id":"official-key"`, `"bark_id":"invalid-key"`, `"status":"device_present"`, `"status":"device_missing"`, `"status":"official_unverified"`, `"status":"configuration_invalid"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("liveness response missing %s: %s", expected, body)
+		}
+	}
+	reopened, err := newSubscriptionLivenessStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, status := range map[string]string{
+		"alive-key":    subscriptionLivenessDevicePresent,
+		"missing-key":  subscriptionLivenessDeviceMissing,
+		"official-key": subscriptionLivenessOfficialUnverified,
+		"invalid-key":  subscriptionLivenessConfigurationInvalid,
+	} {
+		sub, ok := store.Get(key)
+		if !ok || reopened.Snapshot(sub).Status != status {
+			t.Fatalf("persisted liveness label for %s = %#v", key, reopened.Snapshot(sub))
+		}
+	}
+	for status, expectedKey := range map[string]string{
+		subscriptionLivenessDevicePresent:        "alive-key",
+		subscriptionLivenessDeviceMissing:        "missing-key",
+		subscriptionLivenessOfficialUnverified:   "official-key",
+		subscriptionLivenessConfigurationInvalid: "invalid-key",
+	} {
+		filteredList := httptest.NewRecorder()
+		target := "/api/admin/subscriptions?liveness_status=" + status
+		handler.ServeHTTP(filteredList, adminRequest(http.MethodGet, target, nil, cfg))
+		filteredBody := filteredList.Body.String()
+		if filteredList.Code != http.StatusOK || !strings.Contains(filteredBody, `"total":1`) || !strings.Contains(filteredBody, `"bark_id":"`+expectedKey+`"`) || !strings.Contains(filteredBody, `"liveness_status":"`+status+`"`) {
+			t.Fatalf("liveness filter %s status=%d body=%s", status, filteredList.Code, filteredBody)
 		}
 	}
 	selectedPayload, _ := json.Marshal(adminSubscriptionLivenessRequest{BarkIDs: []string{"alive-key"}})

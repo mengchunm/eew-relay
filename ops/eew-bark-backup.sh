@@ -94,6 +94,11 @@ if [ -f "$EEW_ROOT/data/notification-display.json" ]; then
   install -m 600 "$EEW_ROOT/data/notification-display.json" "$tmp/notification-display.json"
   notification_display_included=1
 fi
+subscription_liveness_included=0
+if [ -f "$EEW_ROOT/data/subscription-liveness.json" ]; then
+  install -m 600 "$EEW_ROOT/data/subscription-liveness.json" "$tmp/subscription-liveness.json"
+  subscription_liveness_included=1
+fi
 
 bark_ok=0
 if [ -f "$BARK_DB" ] && [ -x "$BBOLT" ]; then
@@ -123,6 +128,7 @@ legacy_json_subscriptions=$legacy_subscriptions
 legacy_bbolt_included=$bark_ok
 service_health_included=$service_health_included
 notification_display_included=$notification_display_included
+subscription_liveness_included=$subscription_liveness_included
 EOF
 chmod 600 "$tmp/MANIFEST"
 

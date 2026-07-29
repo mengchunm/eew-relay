@@ -150,10 +150,10 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 
 重启服务后访问 `https://eew.example.com/admin`。登录成功后，服务签发最长 24 小时、默认 8 小时有效的 HttpOnly、SameSite=Strict 签名会话 Cookie。管理员后台可以：
 
-- 按 Bark Key/地点、服务器、通知等级和订阅日期筛选，按表格列排序、分页查看和批量删除订阅；
+- 按 Bark Key/地点、服务器、通知等级、测活标签和订阅日期筛选，按表格列排序、分页查看和批量删除订阅；
 - 一次校验并新增最多 100 个 Bark Key，且默认拒绝覆盖已存在订阅；
 - 将同一真实地震的多个报次及不同台站消息归纳展示，查看震中、震级、深度、烈度、坐标、各报投递变化及脱敏逐用户明细；
-- 对选中订阅或当前筛选结果只读测活，比对自建 Bark 设备库且不触发 Bark/APNs 消息；
+- 对选中订阅或当前筛选结果只读测活，不触发 Bark/APNs 消息；测活后为每个订阅保存“设备库存在”“设备库缺失”“配置异常”或“官方未验证”标签，尚未检查或测活后又被修改的订阅显示“未测活”，可按标签筛选和排序。官方 Bark 没有无消息 Key 校验接口，因此只能标为“官方未验证”；标签保存在数据目录下权限为 `0600` 的 `subscription-liveness.json` 中；
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
 - 在独立“服务监控”页面按时间轴查看应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态。服务器每分钟采样一次，历史写入数据目录下的 `service-health.jsonl`，保留 30 天并支持最近 24 小时、7 天和 30 天视图；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
@@ -413,7 +413,7 @@ sudo AREACITY_GEOJSONSEQ_GZ=/path/to/areacity.geojsonseq.gz \
 
 ## 备份与回滚
 
-生产环境可以安装 `ops/eew-bark-backup.sh`、`.service` 和 `.timer` 做每日无停机快照。脚本直接导出 PostgreSQL 订阅库和 Bark MySQL 设备库，验证 PostgreSQL archive、MySQL devices 表及全部文件校验和，并保存部署配置。迁移期的 JSON 和 bbolt 文件只作为旧版回滚材料附带保存，不再是主数据源。备份目录和文件分别为 `0700`、`0600`，默认保留 14 天。
+生产环境可以安装 `ops/eew-bark-backup.sh`、`.service` 和 `.timer` 做每日无停机快照。脚本直接导出 PostgreSQL 订阅库和 Bark MySQL 设备库，验证 PostgreSQL archive、MySQL devices 表及全部文件校验和，并保存部署配置、服务健康历史、通知展示设置和订阅测活标签。迁移期的 JSON 和 bbolt 文件只作为旧版回滚材料附带保存，不再是主数据源。备份目录和文件分别为 `0700`、`0600`，默认保留 14 天。
 
 该定时任务只提供同机恢复点，不是异地备份。PostgreSQL 使用一致性逻辑备份，MySQL 使用 `--single-transaction` 导出；生产环境仍应把通过校验的备份同步到加密的异地存储。
 

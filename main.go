@@ -45,13 +45,14 @@ import (
 var publicFS embed.FS
 
 type Config struct {
-	Bark                BarkConfig   `yaml:"bark"`
-	Server              ServerConfig `yaml:"server"`
-	Wolfx               WolfxConfig  `yaml:"wolfx"`
-	Alert               AlertConfig  `yaml:"alert"`
-	Relay               RelayConfig  `yaml:"relay"`
-	Queue               QueueConfig  `yaml:"queue"`
-	notificationDisplay *notificationDisplaySettingsStore
+	Bark                 BarkConfig   `yaml:"bark"`
+	Server               ServerConfig `yaml:"server"`
+	Wolfx                WolfxConfig  `yaml:"wolfx"`
+	Alert                AlertConfig  `yaml:"alert"`
+	Relay                RelayConfig  `yaml:"relay"`
+	Queue                QueueConfig  `yaml:"queue"`
+	notificationDisplay  *notificationDisplaySettingsStore
+	subscriptionLiveness *subscriptionLivenessStore
 }
 
 type QueueConfig struct {
@@ -931,6 +932,11 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("load notification display settings: %w", err)
 	}
 	cfg.notificationDisplay = display
+	liveness, err := newSubscriptionLivenessStore(cfg)
+	if err != nil {
+		return Config{}, fmt.Errorf("load subscription liveness labels: %w", err)
+	}
+	cfg.subscriptionLiveness = liveness
 	return cfg, nil
 }
 
@@ -1695,6 +1701,13 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 			log.Printf("load notification display settings: %v", err)
 		}
 		cfg.notificationDisplay = display
+	}
+	if cfg.subscriptionLiveness == nil {
+		liveness, err := newSubscriptionLivenessStore(cfg)
+		if err != nil {
+			log.Printf("load subscription liveness labels: %v", err)
+		}
+		cfg.subscriptionLiveness = liveness
 	}
 	mux := http.NewServeMux()
 	serviceMonitor := newAdminServiceMonitor(cfg, store, notifier, health)
