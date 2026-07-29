@@ -161,6 +161,15 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 
 管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
 
+如果从旧版本迁移的订阅含有零宽、越界、重复或冲突的通知档位，可以先执行只读预检，再在完成数据库备份后运行一次性修复：
+
+```bash
+./eew-bark -config /app/config.yaml -repair-notification-bands-dry-run
+./eew-bark -config /app/config.yaml -repair-notification-bands
+```
+
+修复器优先只调整错误档位，在相邻有效档位之间选择最接近默认配置的非重叠区间，并保留其余有效自定义档位；只有无法安全容纳时才将该订阅整组恢复为默认三档。PostgreSQL 写入使用单个事务和原更新时间条件，发现并发修改会整批回滚。正常运行路径不会为错误档位提供兼容回退。
+
 Bark Key 同时是用户管理凭据。新页面和通知链接不再把 Key 放进服务器可见的 path 或 query：
 
 ```text

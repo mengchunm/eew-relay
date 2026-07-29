@@ -501,11 +501,29 @@ func main() {
 	queueWorker := flag.Bool("queue-worker", false, "run only a NATS JetStream push worker")
 	migrateOnly := flag.Bool("migrate-only", false, "initialize configured stores, report counts, and exit")
 	refreshLocationNames := flag.Bool("refresh-location-names", false, "refresh all saved locations with current administrative boundaries and exit")
+	repairNotificationBands := flag.Bool("repair-notification-bands", false, "repair invalid notification bands in the configured subscription store and exit")
+	repairNotificationBandsDryRun := flag.Bool("repair-notification-bands-dry-run", false, "report invalid notification band repairs without writing and exit")
 	flag.Parse()
+	if *repairNotificationBands && *repairNotificationBandsDryRun {
+		log.Fatal("choose either -repair-notification-bands or -repair-notification-bands-dry-run")
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+	if *repairNotificationBands || *repairNotificationBandsDryRun {
+		store, err := NewConfiguredStore(cfg.Server.DataPath, cfg.Server.PostgresDSN)
+		if err != nil {
+			log.Fatalf("load subscriptions: %v", err)
+		}
+		defer store.Close()
+		summary, err := repairStoredNotificationBands(context.Background(), store, *repairNotificationBands)
+		if err != nil {
+			log.Fatalf("repair notification bands: %v", err)
+		}
+		log.Printf("notification band repair apply=%t scanned=%d repaired=%d individual=%d reset_to_defaults=%d", *repairNotificationBands, summary.Scanned, summary.Repaired, summary.IndividuallyRepaired, summary.ResetToDefaults)
+		return
 	}
 
 	notifier := NewNotifierWithRelay(cfg.Bark, cfg.Alert, cfg.Relay)
