@@ -157,6 +157,7 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
 - 在独立“服务监控”页面按时间轴查看应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态。服务器每分钟采样一次，历史写入数据目录下的 `service-health.jsonl`，保留 30 天并支持最近 24 小时、7 天和 30 天视图；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
+- 在“系统概览”中分别开关新生成通知的烈度信息和预估到达时间。开关同时作用于 Bark 标题/正文及通知详情网页，不改变烈度计算、订阅筛选或推送判定；详情页会保留通知生成时的设置，历史通知不回溯修改。设置持久化到数据目录下的 `notification-display.json`，默认两项均显示。
 
 管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
 

@@ -89,6 +89,11 @@ if [ -f "$EEW_ROOT/data/service-health.jsonl" ]; then
   install -m 600 "$EEW_ROOT/data/service-health.jsonl" "$tmp/service-health.jsonl"
   service_health_included=1
 fi
+notification_display_included=0
+if [ -f "$EEW_ROOT/data/notification-display.json" ]; then
+  install -m 600 "$EEW_ROOT/data/notification-display.json" "$tmp/notification-display.json"
+  notification_display_included=1
+fi
 
 bark_ok=0
 if [ -f "$BARK_DB" ] && [ -x "$BBOLT" ]; then
@@ -117,6 +122,7 @@ mysql_bark_devices=$bark_devices
 legacy_json_subscriptions=$legacy_subscriptions
 legacy_bbolt_included=$bark_ok
 service_health_included=$service_health_included
+notification_display_included=$notification_display_included
 EOF
 chmod 600 "$tmp/MANIFEST"
 

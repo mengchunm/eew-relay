@@ -126,6 +126,9 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="service-history-chart"`,
 		`/api/admin/services`,
 		`/api/admin/services/history`,
+		`id="show-notification-intensity"`,
+		`id="show-notification-time"`,
+		`/api/admin/notification-display`,
 		`最近 30 天`,
 		`不发送任何通知`,
 	} {
@@ -135,6 +138,44 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 	}
 	if strings.Contains(body, cfg.Server.AdminPassword) {
 		t.Fatalf("unexpected admin page body")
+	}
+}
+
+func TestAdminNotificationDisplaySettingsAPI(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, _, _ := adminTestHandler(t, cfg)
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/admin/notification-display", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, adminRequest(http.MethodGet, "/api/admin/notification-display", nil, cfg))
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"show_intensity":true`) || !strings.Contains(get.Body.String(), `"show_estimated_time":true`) {
+		t.Fatalf("default settings status=%d body=%s", get.Code, get.Body.String())
+	}
+
+	update := httptest.NewRecorder()
+	handler.ServeHTTP(update, adminRequest(http.MethodPut, "/api/admin/notification-display", []byte(`{"show_intensity":false,"show_estimated_time":true}`), cfg))
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"show_intensity":false`) || !strings.Contains(update.Body.String(), `"show_estimated_time":true`) {
+		t.Fatalf("update settings status=%d body=%s", update.Code, update.Body.String())
+	}
+
+	reopened, err := newNotificationDisplaySettingsStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := reopened.Snapshot()
+	if settings.ShowIntensity || !settings.ShowEstimatedTime || settings.UpdatedAt == "" {
+		t.Fatalf("settings were not persisted: %#v", settings)
+	}
+
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, adminRequest(http.MethodPut, "/api/admin/notification-display", []byte(`{"show_intensity":true}`), cfg))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("incomplete update status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 }
 

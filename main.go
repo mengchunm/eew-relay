@@ -45,12 +45,13 @@ import (
 var publicFS embed.FS
 
 type Config struct {
-	Bark   BarkConfig   `yaml:"bark"`
-	Server ServerConfig `yaml:"server"`
-	Wolfx  WolfxConfig  `yaml:"wolfx"`
-	Alert  AlertConfig  `yaml:"alert"`
-	Relay  RelayConfig  `yaml:"relay"`
-	Queue  QueueConfig  `yaml:"queue"`
+	Bark                BarkConfig   `yaml:"bark"`
+	Server              ServerConfig `yaml:"server"`
+	Wolfx               WolfxConfig  `yaml:"wolfx"`
+	Alert               AlertConfig  `yaml:"alert"`
+	Relay               RelayConfig  `yaml:"relay"`
+	Queue               QueueConfig  `yaml:"queue"`
+	notificationDisplay *notificationDisplaySettingsStore
 }
 
 type QueueConfig struct {
@@ -170,6 +171,7 @@ type AlertPage struct {
 	MapURL     string
 	PWaveKMS   float64
 	SWaveKMS   float64
+	Display    NotificationDisplaySettings
 }
 
 type PushOptions struct {
@@ -906,6 +908,11 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Server.SimulationRateBurst <= 0 {
 		cfg.Server.SimulationRateBurst = 4
 	}
+	display, err := newNotificationDisplaySettingsStore(cfg)
+	if err != nil {
+		return Config{}, fmt.Errorf("load notification display settings: %w", err)
+	}
+	cfg.notificationDisplay = display
 	return cfg, nil
 }
 
@@ -1664,6 +1671,13 @@ func newHTTPHandler(cfg Config, store *Store, alertCache *AlertCache, notifier *
 }
 
 func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth) http.Handler {
+	if cfg.notificationDisplay == nil {
+		display, err := newNotificationDisplaySettingsStore(cfg)
+		if err != nil {
+			log.Printf("load notification display settings: %v", err)
+		}
+		cfg.notificationDisplay = display
+	}
 	mux := http.NewServeMux()
 	serviceMonitor := newAdminServiceMonitor(cfg, store, notifier, health)
 	if ctx != nil {
@@ -3292,6 +3306,8 @@ func renderAlertPage(w http.ResponseWriter, page AlertPage) {
 		SWaveKMS           string
 		DepthKM            string
 		IsTest             bool
+		ShowIntensity      bool
+		ShowEstimatedTime  bool
 		ManageURL          string
 		BarkIDJSON         SafeJS
 	}{
@@ -3325,6 +3341,8 @@ func renderAlertPage(w http.ResponseWriter, page AlertPage) {
 		SWaveKMS:           fmt.Sprintf("%.3f", sWaveKMS),
 		DepthKM:            fmt.Sprintf("%.3f", math.Max(0, page.Event.DepthKM)),
 		IsTest:             isTestEvent(page.Event) || isHistoryTestEvent(page.Event),
+		ShowIntensity:      page.Display.ShowIntensity,
+		ShowEstimatedTime:  page.Display.ShowEstimatedTime,
 		ManageURL:          "/#key=" + url.PathEscape(page.Subscriber.BarkID),
 	}
 	barkIDJSON, _ := json.Marshal(page.Subscriber.BarkID)
@@ -3647,7 +3665,7 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
     .tag.test{background:rgba(247,144,9,.22)}h1{font-size:clamp(22px,6vw,34px);line-height:1.12;margin:0 0 6px;letter-spacing:0}.meta{font-size:13px;line-height:1.45;opacity:.88}
     .status-card{background:rgba(18,22,27,.72);border:1px solid rgba(255,255,255,.2);border-radius:12px;padding:12px;box-shadow:0 14px 32px rgba(0,0,0,.18);pointer-events:auto}
     .countdown{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px;margin:10px 0}.count-label{font-size:14px;font-weight:800;opacity:.92}.count-value{font-size:clamp(46px,15vw,78px);line-height:.88;font-weight:900;letter-spacing:0}.count-unit{font-size:20px;margin-left:4px}.arrived{font-size:clamp(32px,10vw,52px)}
-    .quick{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.quick .tile{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:9px}.tile .label{font-size:12px;opacity:.78;margin-bottom:4px}.tile .value{font-size:18px;font-weight:900}
+    .quick{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.quick.two{grid-template-columns:repeat(2,1fr)}.quick .tile{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:9px}.tile .label{font-size:12px;opacity:.78;margin-bottom:4px}.tile .value{font-size:18px;font-weight:900}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 12px 28px rgba(0,0,0,.16);pointer-events:auto}h2{font-size:17px;margin:0 0 12px}
     dl{display:grid;grid-template-columns:112px 1fr;gap:10px 12px;margin:0}dt{color:var(--muted)}dd{margin:0;font-weight:700;word-break:break-word}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .btn{min-height:52px;border-radius:8px;display:flex;align-items:center;justify-content:center;text-align:center;text-decoration:none;font-weight:900;border:0;font-size:15px;font-family:inherit;padding:0 12px;line-height:1.2;cursor:pointer}.primary{background:var(--red);color:#fff}.secondary{background:var(--soft);color:var(--text);border:1px solid var(--line)}.danger{background:rgba(217,45,32,.12);color:var(--red);border:1px solid rgba(217,45,32,.36)}.btn:disabled{opacity:.56;cursor:not-allowed}.action-status{grid-column:1/-1;margin:0;color:var(--muted);font-size:13px;line-height:1.45;min-height:18px}.action-status.ok{color:#067647}.action-status.err{color:var(--red)}
@@ -3668,15 +3686,15 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
       <div class="tag {{if .IsTest}}test{{end}}">{{if .IsTest}}模拟测试{{else}}地震预警{{end}}</div>
       <h1>{{.Region}} {{.Magnitude}}</h1>
       <div class="meta">第 {{.ReportNum}} 报 · 发震 {{.OriginTime}}</div>
-      <div class="countdown">
+      {{if .ShowEstimatedTime}}<div class="countdown">
         <div>
           <div class="count-label">S 波到达订阅地</div>
           <div id="p-count" class="meta">P 波 {{if gt .SecondsToP 0}}+{{.SecondsToP}}秒{{else}}已到达{{end}}</div>
         </div>
         <div id="s-count" class="count-value">{{if gt .SecondsToS 0}}{{.SecondsToS}}<span class="count-unit">秒</span>{{else}}<span class="arrived">已到达</span>{{end}}</div>
-      </div>
-      <div class="quick">
-        <div class="tile"><div class="label">预计烈度</div><div class="value">{{.EstimatedIntensity}}</div></div>
+      </div>{{end}}
+      <div class="quick {{if not .ShowIntensity}}two{{end}}">
+        {{if .ShowIntensity}}<div class="tile"><div class="label">预计烈度</div><div class="value">{{.EstimatedIntensity}}</div></div>{{end}}
         <div class="tile"><div class="label">震中距</div><div class="value">{{.Distance}}</div></div>
         <div class="tile"><div class="label">震级</div><div class="value">{{.Magnitude}}</div></div>
       </div>
@@ -3688,7 +3706,7 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
       <summary>详细信息</summary>
       <div class="detail-body">
         <dl>
-          <dt>事件 ID</dt><dd>{{.EventID}}</dd><dt>来源</dt><dd>{{.Source}}</dd><dt>震中</dt><dd>{{.Epicenter}}</dd><dt>订阅位置</dt><dd>{{.SubscriberLocation}}</dd><dt>震源深度</dt><dd>{{.Depth}}</dd><dt>最大烈度</dt><dd>{{.MaxIntensity}}</dd><dt>P 波到达</dt><dd>{{.PArrival}}</dd><dt>S 波到达</dt><dd>{{.SArrival}}</dd><dt>震源距</dt><dd>{{.Hypocentral}}</dd><dt>页面生成</dt><dd>{{.CreatedAt}}</dd>
+          <dt>事件 ID</dt><dd>{{.EventID}}</dd><dt>来源</dt><dd>{{.Source}}</dd><dt>震中</dt><dd>{{.Epicenter}}</dd><dt>订阅位置</dt><dd>{{.SubscriberLocation}}</dd><dt>震源深度</dt><dd>{{.Depth}}</dd>{{if .ShowIntensity}}<dt>最大烈度</dt><dd>{{.MaxIntensity}}</dd>{{end}}{{if .ShowEstimatedTime}}<dt>P 波到达</dt><dd>{{.PArrival}}</dd><dt>S 波到达</dt><dd>{{.SArrival}}</dd>{{end}}<dt>震源距</dt><dd>{{.Hypocentral}}</dd><dt>页面生成</dt><dd>{{.CreatedAt}}</dd>
         </dl>
       </div>
     </details>
@@ -3701,7 +3719,7 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
   const alertBarkID={{.BarkIDJSON}}, api=location.origin;
   try{localStorage.setItem("eew_bark_id",alertBarkID)}catch(e){}
   const epicenter=[{{.MapEpicenterLat}},{{.MapEpicenterLon}}], subscriber=[{{.MapSubscriberLat}},{{.MapSubscriberLon}}];
-  const originTime={{.OriginUnix}}, pArrival={{.PArrivalUnix}}, sArrival={{.SArrivalUnix}}, depthKM={{.DepthKM}};
+  const showEstimatedTime={{.ShowEstimatedTime}}, originTime={{.OriginUnix}}, pArrival={{.PArrivalUnix}}, sArrival={{.SArrivalUnix}}, depthKM={{.DepthKM}};
   const tileURL="/map-tiles/{z}/{x}/{y}{r}.png";
   function mapDistanceKM(mapInstance,a,b){return mapInstance.distance(a,b)/1000;}
   function surfaceWaveRadiusKM(arrivalTime,elapsed,routeKM){
@@ -3740,7 +3758,7 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
     const route=L.polyline([subscriber,epicenter],{color:"#f04438",weight:4,opacity:.9,dashArray:"8 8"}).addTo(mapInstance);
     L.circleMarker(epicenter,{radius:9,color:"#fff",weight:2,fillColor:"#f04438",fillOpacity:1}).addTo(mapInstance);
     L.circleMarker(subscriber,{radius:8,color:"#fff",weight:2,fillColor:"#175cd3",fillOpacity:1}).addTo(mapInstance);
-    setTimeout(function(){drawSeismicWaves(mapInstance);},120);
+    if(showEstimatedTime) setTimeout(function(){drawSeismicWaves(mapInstance);},120);
     return route;
   }
   const map=L.map("map",{zoomControl:false,attributionControl:true,dragging:true,scrollWheelZoom:true,doubleClickZoom:true,boxZoom:true,keyboard:true,tap:true});
@@ -3829,11 +3847,12 @@ var alertPageTemplate = template.Must(template.New("alert").Parse(`<!doctype htm
     }
   });
   function tick(){
+    if(!sEl||!pEl) return;
     const now=Date.now(), s=Math.ceil((sArrival-now)/1000), p=Math.ceil((pArrival-now)/1000);
     sEl.innerHTML=s>0?String(s)+'<span class="count-unit">秒</span>':'<span class="arrived">已到达</span>';
     pEl.textContent=p>0?'+'+String(p)+'秒':'已到达';
   }
-  tick(); setInterval(tick,250);
+  if(showEstimatedTime){tick(); setInterval(tick,250)}
 </script>
 </body>
 </html>`))
@@ -4259,10 +4278,11 @@ func fanoutPlanLess(aPriority int, a Decision, bPriority int, b Decision) bool {
 }
 
 func buildFanoutTarget(cfg Config, event Event, alertCache *AlertCache, sub Subscription, decision Decision, options PushOptions, level string, priority int) fanoutTarget {
-	title, subtitle, body := formatAlert(event, decision, sub)
+	display := notificationDisplaySettings(cfg)
+	title, subtitle, body := formatAlert(event, decision, sub, display)
 	params := map[string]string{"id": pushNotificationID(event)}
 	if !event.Cancel {
-		params["url"] = clickURL(cfg, alertCache, event, decision, sub, appleMapsDirectionsURL(sub, event))
+		params["url"] = clickURL(cfg, alertCache, event, decision, sub, appleMapsDirectionsURL(sub, event), display)
 	}
 	addBarkIconParam(cfg, params, options.Level)
 	return fanoutTarget{Sub: sub, Decision: decision, Title: title, Subtitle: subtitle, Body: body, Params: params, Options: options, Level: level, Priority: priority}
@@ -4742,11 +4762,12 @@ func dispatchOne(ctx context.Context, cfg Config, notifier *Notifier, alertCache
 	if notifyLevelForEvent(event, sub, decision) == "" {
 		return 0, 1
 	}
-	title, subtitle, body := formatAlert(event, decision, sub)
+	display := notificationDisplaySettings(cfg)
+	title, subtitle, body := formatAlert(event, decision, sub, display)
 	mapURL := appleMapsDirectionsURL(sub, event)
 	params := map[string]string{}
 	if !event.Cancel {
-		params["url"] = clickURL(cfg, alertCache, event, decision, sub, mapURL)
+		params["url"] = clickURL(cfg, alertCache, event, decision, sub, mapURL, display)
 	}
 	options := pushOptions(cfg, event, sub, decision)
 	addBarkIconParam(cfg, params, options.Level)
@@ -5841,7 +5862,11 @@ func interpolatedRegionalTravelSeconds(deltaDeg float64) (float64, float64, bool
 	return 0, 0, false
 }
 
-func formatAlert(event Event, d Decision, sub Subscription) (string, string, string) {
+func formatAlert(event Event, d Decision, sub Subscription, displays ...NotificationDisplaySettings) (string, string, string) {
+	display := defaultNotificationDisplaySettings()
+	if len(displays) > 0 {
+		display = displays[0]
+	}
 	if event.Cancel {
 		region := strings.TrimSpace(event.Hypocenter)
 		if region == "" {
@@ -5854,25 +5879,31 @@ func formatAlert(event Event, d Decision, sub Subscription) (string, string, str
 			fmt.Sprintf("事件 ID: %s", event.EventID),
 		}, "\n")
 	}
-	eta := "已到达"
-	if d.SecondsToS > 0 {
-		eta = fmt.Sprintf("%d秒后到达", d.SecondsToS)
-	}
 	region := event.Hypocenter
 	if region == "" {
 		region = fmt.Sprintf("%.2f, %.2f", event.Latitude, event.Longitude)
 	}
 
-	title := fmt.Sprintf("地震警报 %s", eta)
+	title := "地震警报"
 	if isTestEvent(event) {
-		title = fmt.Sprintf("地震警报测试 %s", eta)
+		title = "地震警报测试"
 	} else if isHistoryTestEvent(event) {
-		title = fmt.Sprintf("历史地震复现测试 %s", eta)
+		title = "历史地震复现测试"
 	} else if event.Revision {
-		title = fmt.Sprintf("地震警报修订 %s", eta)
+		title = "地震警报修订"
+	}
+	if display.ShowEstimatedTime {
+		eta := "已到达"
+		if d.SecondsToS > 0 {
+			eta = fmt.Sprintf("%d秒后到达", d.SecondsToS)
+		}
+		title += " " + eta
 	}
 	intensityRank := intensityRank(d.EstimatedIntensity)
-	subtitle := fmt.Sprintf("M%.1f 预计烈度 %.1f（%s）", event.Magnitude, d.EstimatedIntensity, intensityDescription(intensityRank))
+	subtitle := fmt.Sprintf("M%.1f", event.Magnitude)
+	if display.ShowIntensity {
+		subtitle += fmt.Sprintf(" 预计烈度 %.1f（%s）", d.EstimatedIntensity, intensityDescription(intensityRank))
+	}
 	lines := []string{}
 	switch {
 	case isTestEvent(event):
@@ -5880,22 +5911,57 @@ func formatAlert(event Event, d Decision, sub Subscription) (string, string, str
 	case isHistoryTestEvent(event):
 		lines = append(lines, "[历史复现测试] 这是一条使用历史数据生成的测试通知，不是当前发生的地震。")
 	case event.Revision:
-		lines = append(lines, "[修订] "+earthquakeRevisionLabel(event.RevisionFields)+"发生显著变化，以下为最新信息。")
+		revisionFields := event.RevisionFields
+		if !display.ShowIntensity {
+			revisionFields = slicesWithout(revisionFields, "max_intensity")
+		}
+		lines = append(lines, "[修订] "+earthquakeRevisionLabel(revisionFields)+"发生显著变化，以下为最新信息。")
 	}
 	notifyLevel := notifyLevelForEvent(event, sub, d)
 	lines = append(lines,
 		fmt.Sprintf("%s 距%.0fkm", region, d.DistanceKM),
-		"预计到达时间 "+formatBeijing(d.SArrival, "15:04:05"),
-		intensityAdvice(intensityRank),
+	)
+	if display.ShowEstimatedTime {
+		lines = append(lines, "预计到达时间 "+formatBeijing(d.SArrival, "15:04:05"))
+	}
+	if display.ShowIntensity {
+		lines = append(lines, intensityAdvice(intensityRank))
+	}
+	lines = append(lines,
 		fmt.Sprintf("来源: %s 第%d报", alertSourceLabel(event), event.ReportNum),
 		fmt.Sprintf("震源: %.2f, %.2f 深度%.0fkm", event.Latitude, event.Longitude, event.DepthKM),
 		fmt.Sprintf("距离: 震中%.0fkm 震源%.0fkm", d.DistanceKM, d.HypocentralKM),
-		fmt.Sprintf("预计: P波%+d秒 S波%+d秒 烈度%.1f", d.SecondsToP, d.SecondsToS, d.EstimatedIntensity),
-		fmt.Sprintf("提醒: %s", intensityBandLabel(notifyLevel)),
-		fmt.Sprintf("震级: M%.1f 最大烈度%s", event.Magnitude, fallback(event.MaxIntensity, "未知")),
 	)
+	estimates := make([]string, 0, 3)
+	if display.ShowEstimatedTime {
+		estimates = append(estimates, fmt.Sprintf("P波%+d秒", d.SecondsToP), fmt.Sprintf("S波%+d秒", d.SecondsToS))
+	}
+	if display.ShowIntensity {
+		estimates = append(estimates, fmt.Sprintf("烈度%.1f", d.EstimatedIntensity))
+	}
+	if len(estimates) > 0 {
+		lines = append(lines, "预计: "+strings.Join(estimates, " "))
+	}
+	if display.ShowIntensity {
+		lines = append(lines, fmt.Sprintf("提醒: %s", intensityBandLabel(notifyLevel)))
+	}
+	magnitudeLine := fmt.Sprintf("震级: M%.1f", event.Magnitude)
+	if display.ShowIntensity {
+		magnitudeLine += " 最大烈度" + fallback(event.MaxIntensity, "未知")
+	}
+	lines = append(lines, magnitudeLine)
 	lines = append(lines, "发震: "+alertOriginTimeLabel(event))
 	return title, subtitle, strings.Join(lines, "\n")
+}
+
+func slicesWithout(values []string, excluded string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != excluded {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
 }
 
 func earthquakeRevisionLabel(fields []string) string {
@@ -5988,7 +6054,7 @@ func alertSourceLabel(event Event) string {
 	return event.Type
 }
 
-func clickURL(cfg Config, alertCache *AlertCache, event Event, decision Decision, sub Subscription, mapURL string) string {
+func clickURL(cfg Config, alertCache *AlertCache, event Event, decision Decision, sub Subscription, mapURL string, display NotificationDisplaySettings) string {
 	if strings.TrimSpace(cfg.Alert.ClickURL) != "" {
 		return strings.TrimSpace(cfg.Alert.ClickURL)
 	}
@@ -6004,6 +6070,7 @@ func clickURL(cfg Config, alertCache *AlertCache, event Event, decision Decision
 		MapURL:     mapURL,
 		PWaveKMS:   cfg.Alert.PWaveKMS,
 		SWaveKMS:   cfg.Alert.SWaveKMS,
+		Display:    display,
 	})
 	if err != nil {
 		log.Printf("create alert detail token failed: %v", err)

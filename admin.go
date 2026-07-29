@@ -337,6 +337,39 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 		data := buildAdminOverview(r.Context(), cfg, store, notifier, health)
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
 	}))
+	mux.HandleFunc("GET /api/admin/notification-display", auth.require(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: notificationDisplaySettings(cfg)})
+	}))
+	mux.HandleFunc("PUT /api/admin/notification-display", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		var request struct {
+			ShowIntensity     *bool `json:"show_intensity"`
+			ShowEstimatedTime *bool `json:"show_estimated_time"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil || request.ShowIntensity == nil || request.ShowEstimatedTime == nil {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "请同时提供显示烈度和显示预估时间设置"})
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "请同时提供显示烈度和显示预估时间设置"})
+			return
+		}
+		if cfg.notificationDisplay == nil {
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "通知展示设置尚未初始化"})
+			return
+		}
+		settings, err := cfg.notificationDisplay.Update(*request.ShowIntensity, *request.ShowEstimatedTime, time.Now())
+		if err != nil {
+			log.Printf("update notification display settings: %v", err)
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "保存通知展示设置失败"})
+			return
+		}
+		log.Printf("admin notification display updated intensity=%t estimated_time=%t ip=%s", settings.ShowIntensity, settings.ShowEstimatedTime, clientIP(r))
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "设置已保存", Data: settings})
+	}))
 	mux.HandleFunc("GET /api/admin/services", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		data := serviceMonitor.Snapshot(r.Context())
