@@ -543,6 +543,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go maintainAuditRetention(ctx, cfg)
+	go maintainHistoryCache(ctx, cfg)
 
 	httpErr := make(chan error, 1)
 	go func() {
@@ -5191,6 +5192,9 @@ func historyRecords(ctx context.Context, cfg Config, forceRefresh bool) ([]Histo
 	}
 
 	mergedRemote := mergeHistoryRecords(latest, cache.Records)
+	if len(mergedRemote) > 5000 {
+		mergedRemote = mergedRemote[:5000]
+	}
 	if err := saveHistoryCache(cfg.Server.HistoryPath, HistoryCacheFile{
 		UpdatedAt: time.Now().Unix(),
 		Records:   mergedRemote,
@@ -5198,6 +5202,31 @@ func historyRecords(ctx context.Context, cfg Config, forceRefresh bool) ([]Histo
 		log.Printf("save history cache failed: %v", err)
 	}
 	return mergeHistoryRecords(builtinHistoryRecords(), mergedRemote), nil
+}
+
+func maintainHistoryCache(ctx context.Context, cfg Config) {
+	refreshInterval := time.Duration(cfg.Server.HistoryRefreshMinutes) * time.Minute
+	if refreshInterval <= 0 {
+		refreshInterval = time.Hour
+	}
+	refresh := func() {
+		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if _, err := historyRecords(refreshCtx, cfg, true); err != nil && ctx.Err() == nil {
+			log.Printf("maintain earthquake history cache: %v", err)
+		}
+	}
+	refresh()
+	ticker := time.NewTicker(refreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh()
+		}
+	}
 }
 
 func loadHistoryCache(path string) (HistoryCacheFile, error) {

@@ -105,6 +105,9 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="subscription-level"`,
 		`id="subscription-created-from"`,
 		`id="run-liveness"`,
+		`id="run-liveness" class="btn btn-secondary">测活</button>`,
+		`data-sort="bark_id"`,
+		`data-sort="updated_at"`,
 		`/api/admin/subscriptions/liveness`,
 		`id="audit-report-list"`,
 	} {
@@ -204,6 +207,38 @@ func TestAdminCanListAndBatchDeleteSubscriptions(t *testing.T) {
 	}
 }
 
+func TestAdminSubscriptionsSupportStableColumnSorting(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, store, _ := adminTestHandler(t, cfg)
+	for _, sub := range []Subscription{
+		{BarkID: "alpha-key", BarkServer: "https://z.example.test", LocationName: "上海", Latitude: 31, Longitude: 121, NotifyRules: defaultNotificationRules()},
+		{BarkID: "beta-key", BarkServer: "https://a.example.test", LocationName: "北京", Latitude: 39, Longitude: 116, NotifyRules: defaultNotificationRules()},
+	} {
+		if err := store.Upsert(sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		query string
+		first string
+	}{
+		{query: "sort_by=bark_id&sort_order=desc", first: "beta-key"},
+		{query: "sort_by=server&sort_order=asc", first: "beta-key"},
+		{query: "sort_by=location&sort_order=asc", first: "alpha-key"},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/admin/subscriptions?"+test.query, nil, cfg))
+		var response struct {
+			Data struct {
+				Items []Subscription `json:"items"`
+			} `json:"data"`
+		}
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &response) != nil || len(response.Data.Items) != 2 || response.Data.Items[0].BarkID != test.first {
+			t.Fatalf("sort %s status=%d body=%s", test.query, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestAdminAuditAPIReadsSummaryAndMaskedDetails(t *testing.T) {
 	cfg := adminTestConfig(t)
 	handler, _, _ := adminTestHandler(t, cfg)
@@ -261,6 +296,82 @@ func TestAdminAuditGroupsReportsForSameEarthquake(t *testing.T) {
 	}
 }
 
+func TestAdminAuditGroupsSameEarthquakeAcrossSourcesWithoutMergingSameSourceAftershock(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, _, _ := adminTestHandler(t, cfg)
+	now := time.Now().Truncate(time.Second)
+	sub := Subscription{BarkID: "cross-source-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104}
+	events := []Event{
+		{EventID: "cenc-event", ReportNum: 1, Type: "cenc_eew", OriginTime: now, Hypocenter: "四川成都市", Latitude: 30.6, Longitude: 104.1, Magnitude: 5.2},
+		{EventID: "cq-event", ReportNum: 1, Type: "cq_eew", OriginTime: now.Add(time.Second), Hypocenter: "成都附近", Latitude: 30.61, Longitude: 104.11, Magnitude: 5.1},
+		{EventID: "cenc-aftershock", ReportNum: 1, Type: "cenc_eew", OriginTime: now.Add(2 * time.Second), Hypocenter: "华北地区", Latitude: 40, Longitude: 120, Magnitude: 4.8},
+	}
+	for _, event := range events {
+		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, 0, nil)
+		if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/admin/audits", nil, cfg))
+	var response struct {
+		Data struct {
+			Items []adminAuditEventGroup `json:"items"`
+			Total int                    `json:"total"`
+		} `json:"data"`
+	}
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &response) != nil {
+		t.Fatalf("cross-source audits status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if response.Data.Total != 2 {
+		t.Fatalf("same-source aftershock was incorrectly merged: %#v", response.Data.Items)
+	}
+	foundCrossSource := false
+	for _, group := range response.Data.Items {
+		if len(group.Sources) == 2 {
+			foundCrossSource = group.ReportCount == 2 && len(group.EventIDs) == 2 && strings.Contains(group.Source, "中国地震台网") && strings.Contains(group.Source, "重庆地震局")
+		}
+	}
+	if !foundCrossSource {
+		t.Fatalf("cross-source earthquake was not grouped: %#v", response.Data.Items)
+	}
+}
+
+func TestAdminAuditGroupsCrossSourceLegacyEventsByOriginTime(t *testing.T) {
+	cfg := adminTestConfig(t)
+	origin := time.Date(2026, 7, 28, 11, 16, 6, 0, beijingTZ)
+	reports := []adminAuditSummary{
+		{ID: "cenc-legacy", Modified: origin, deliveryAuditSummary: deliveryAuditSummary{EventID: "202607281116.0001", Type: "cenc_eew", OriginTime: origin.Format(time.RFC3339)}},
+		{ID: "cq-legacy", Modified: origin.Add(time.Second), deliveryAuditSummary: deliveryAuditSummary{EventID: "202607281116.0001", Type: "cq_eew", OriginTime: origin.Add(time.Second).Format(time.RFC3339)}},
+	}
+	groups := groupDeliveryAuditSummaries(cfg, reports)
+	if len(groups) != 1 || groups[0].ReportCount != 2 || len(groups[0].Sources) != 2 || groups[0].Title == groups[0].EventID {
+		t.Fatalf("legacy cross-source reports were not grouped with a descriptive title: %#v", groups)
+	}
+}
+
+func TestAdminAuditEnrichesLegacySummaryBySourceAndOriginTime(t *testing.T) {
+	cfg := adminTestConfig(t)
+	cfg.Server.HistoryPath = filepath.Join(t.TempDir(), "history.json")
+	origin := time.Date(2026, 7, 29, 11, 16, 6, 0, beijingTZ)
+	if err := saveHistoryCache(cfg.Server.HistoryPath, HistoryCacheFile{UpdatedAt: time.Now().Unix(), Records: []HistoryRecord{{
+		Source: "cenc", Key: "No1", EventID: "different-final-id", OriginTime: origin.Format("2006-01-02 15:04:05"), Hypocenter: "四川省成都市", Latitude: 30.6, Longitude: 104.1, Magnitude: 5.1, DepthKM: 10, MaxIntensity: "5",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	handler, _, _ := adminTestHandler(t, cfg)
+	event := Event{EventID: "legacy-eew-id", ReportNum: 1, Type: "cq_eew", OriginTime: origin}
+	record := deliveryAuditRecord{EventID: event.EventID, ReportNum: event.ReportNum, Type: event.Type, OriginTime: formatBeijing(origin, time.RFC3339), Status: "filtered"}
+	if err := writeDeliveryAudit(cfg, event, origin, origin, origin.Add(time.Second), 1, 0, 0, 1, 1, []deliveryAuditRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/admin/audits", nil, cfg))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "四川省成都市") || !strings.Contains(recorder.Body.String(), `"magnitude":5.1`) || !strings.Contains(recorder.Body.String(), `"depth_km":10`) {
+		t.Fatalf("legacy audit was not enriched by origin time: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 	var pushRequests atomic.Int32
 	barkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -307,6 +418,21 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("liveness response missing %s: %s", expected, body)
 		}
+	}
+	selectedPayload, _ := json.Marshal(adminSubscriptionLivenessRequest{BarkIDs: []string{"alive-key"}})
+	selected := httptest.NewRecorder()
+	handler.ServeHTTP(selected, adminRequest(http.MethodPost, "/api/admin/subscriptions/liveness", selectedPayload, cfg))
+	if selected.Code != http.StatusOK || !strings.Contains(selected.Body.String(), `"scope":"selected"`) || !strings.Contains(selected.Body.String(), `"total_subscriptions":1`) || !strings.Contains(selected.Body.String(), `"self_hosted_alive":1`) || strings.Contains(selected.Body.String(), `"bark_id":"missing-key"`) {
+		t.Fatalf("selected liveness status=%d body=%s", selected.Code, selected.Body.String())
+	}
+	filteredPayload, _ := json.Marshal(adminSubscriptionLivenessRequest{adminSubscriptionFilter: adminSubscriptionFilter{Query: "missing"}})
+	filtered := httptest.NewRecorder()
+	handler.ServeHTTP(filtered, adminRequest(http.MethodPost, "/api/admin/subscriptions/liveness", filteredPayload, cfg))
+	if filtered.Code != http.StatusOK || !strings.Contains(filtered.Body.String(), `"scope":"filtered"`) || !strings.Contains(filtered.Body.String(), `"total_subscriptions":1`) || !strings.Contains(filtered.Body.String(), `"self_hosted_missing":1`) || strings.Contains(filtered.Body.String(), `"bark_id":"alive-key"`) {
+		t.Fatalf("filtered liveness status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	if pushRequests.Load() != 0 {
+		t.Fatalf("scoped liveness unexpectedly sent %d HTTP push requests", pushRequests.Load())
 	}
 }
 

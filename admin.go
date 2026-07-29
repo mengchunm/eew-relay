@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,9 +52,12 @@ type adminAuditSummary struct {
 
 type adminAuditEventGroup struct {
 	ID            string              `json:"id"`
+	Title         string              `json:"title"`
 	EventID       string              `json:"event_id"`
+	EventIDs      []string            `json:"event_ids"`
 	Type          string              `json:"type"`
 	Source        string              `json:"source"`
+	Sources       []string            `json:"sources"`
 	OriginTime    string              `json:"origin_time"`
 	Hypocenter    string              `json:"hypocenter,omitempty"`
 	Latitude      float64             `json:"latitude,omitempty"`
@@ -74,6 +78,16 @@ type adminAuditEventGroup struct {
 	Reports       []adminAuditSummary `json:"reports"`
 }
 
+type auditHistoryCandidate struct {
+	Record     HistoryRecord
+	OriginTime time.Time
+}
+
+type auditHistoryLookup struct {
+	ByID       map[string]HistoryRecord
+	Candidates []auditHistoryCandidate
+}
+
 type adminBatchSubscriptionsRequest struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 	AllowUpdates  bool           `json:"allow_updates"`
@@ -81,6 +95,19 @@ type adminBatchSubscriptionsRequest struct {
 
 type adminBatchDeleteRequest struct {
 	BarkIDs []string `json:"bark_ids"`
+}
+
+type adminSubscriptionFilter struct {
+	Query       string `json:"q"`
+	Server      string `json:"server"`
+	NotifyLevel string `json:"notify_level"`
+	CreatedFrom string `json:"created_from"`
+	CreatedTo   string `json:"created_to"`
+}
+
+type adminSubscriptionLivenessRequest struct {
+	BarkIDs []string `json:"bark_ids"`
+	adminSubscriptionFilter
 }
 
 type adminTestRequest struct {
@@ -309,23 +336,40 @@ func parseAdminPage(r *http.Request, defaultLimit, maxLimit int) (int, int) {
 }
 
 func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
-	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	serverFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("server")))
+	filter := adminSubscriptionFilter{
+		Query:       r.URL.Query().Get("q"),
+		Server:      r.URL.Query().Get("server"),
+		NotifyLevel: r.URL.Query().Get("notify_level"),
+		CreatedFrom: r.URL.Query().Get("created_from"),
+		CreatedTo:   r.URL.Query().Get("created_to"),
+	}
+	sortBy, sortOrder := normalizeAdminSubscriptionSort(r.URL.Query().Get("sort_by"), r.URL.Query().Get("sort_order"))
+	offset, limit := parseAdminPage(r, 50, 200)
+	filtered := filterAdminSubscriptions(cfg, store.List(), filter)
+	sortAdminSubscriptions(filtered, sortBy, sortOrder)
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
+		"items": filtered[offset:end], "total": total, "offset": offset, "limit": limit, "sort_by": sortBy, "sort_order": sortOrder,
+	}})
+}
+
+func filterAdminSubscriptions(cfg Config, subscriptions []Subscription, filter adminSubscriptionFilter) []Subscription {
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	serverFilter := strings.ToLower(strings.TrimSpace(filter.Server))
 	levelFilter := ""
-	if requestedLevel := strings.TrimSpace(r.URL.Query().Get("notify_level")); validNotifyLevel(requestedLevel) {
+	if requestedLevel := strings.TrimSpace(filter.NotifyLevel); validNotifyLevel(requestedLevel) {
 		levelFilter = normalizeNotifyLevel(requestedLevel)
 	}
-	createdFrom, createdFromOK := parseAdminFilterDate(r.URL.Query().Get("created_from"), false)
-	createdTo, createdToOK := parseAdminFilterDate(r.URL.Query().Get("created_to"), true)
-	offset, limit := parseAdminPage(r, 50, 200)
-	subscriptions := store.List()
-	sort.Slice(subscriptions, func(i, j int) bool {
-		if subscriptions[i].UpdatedAt != subscriptions[j].UpdatedAt {
-			return subscriptions[i].UpdatedAt > subscriptions[j].UpdatedAt
-		}
-		return subscriptions[i].BarkID < subscriptions[j].BarkID
-	})
-	filtered := subscriptions[:0]
+	createdFrom, createdFromOK := parseAdminFilterDate(filter.CreatedFrom, false)
+	createdTo, createdToOK := parseAdminFilterDate(filter.CreatedTo, true)
+	filtered := make([]Subscription, 0, len(subscriptions))
 	for _, sub := range subscriptions {
 		if query != "" && !adminSubscriptionMatches(sub, query) {
 			continue
@@ -352,17 +396,78 @@ func serveAdminSubscriptions(w http.ResponseWriter, r *http.Request, cfg Config,
 		}
 		filtered = append(filtered, sub)
 	}
-	total := len(filtered)
-	if offset > total {
-		offset = total
+	return filtered
+}
+
+func normalizeAdminSubscriptionSort(sortBy, sortOrder string) (string, string) {
+	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
+	switch sortBy {
+	case "bark_id", "server", "location", "notify_level", "updated_at":
+	default:
+		sortBy = "updated_at"
 	}
-	end := offset + limit
-	if end > total {
-		end = total
+	sortOrder = strings.ToLower(strings.TrimSpace(sortOrder))
+	if sortOrder != "asc" && sortOrder != "desc" {
+		if sortBy == "updated_at" {
+			sortOrder = "desc"
+		} else {
+			sortOrder = "asc"
+		}
 	}
-	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
-		"items": filtered[offset:end], "total": total, "offset": offset, "limit": limit,
-	}})
+	return sortBy, sortOrder
+}
+
+func sortAdminSubscriptions(subscriptions []Subscription, sortBy, sortOrder string) {
+	sort.SliceStable(subscriptions, func(i, j int) bool {
+		comparison := compareAdminSubscriptions(subscriptions[i], subscriptions[j], sortBy)
+		if comparison == 0 {
+			comparison = strings.Compare(strings.ToLower(subscriptions[i].BarkID), strings.ToLower(subscriptions[j].BarkID))
+		}
+		if sortOrder == "desc" {
+			return comparison > 0
+		}
+		return comparison < 0
+	})
+}
+
+func compareAdminSubscriptions(left, right Subscription, sortBy string) int {
+	switch sortBy {
+	case "bark_id":
+		return strings.Compare(strings.ToLower(left.BarkID), strings.ToLower(right.BarkID))
+	case "server":
+		return strings.Compare(strings.ToLower(left.BarkServer), strings.ToLower(right.BarkServer))
+	case "location":
+		return strings.Compare(adminSubscriptionLocationSortKey(left), adminSubscriptionLocationSortKey(right))
+	case "notify_level":
+		return strings.Compare(adminSubscriptionNotifySortKey(left), adminSubscriptionNotifySortKey(right))
+	default:
+		if left.UpdatedAt < right.UpdatedAt {
+			return -1
+		}
+		if left.UpdatedAt > right.UpdatedAt {
+			return 1
+		}
+		return 0
+	}
+}
+
+func adminSubscriptionLocationSortKey(sub Subscription) string {
+	if name := strings.TrimSpace(sub.LocationName); name != "" {
+		return strings.ToLower(name)
+	}
+	if len(sub.Locations) > 0 {
+		return strings.ToLower(strings.TrimSpace(sub.Locations[0].Name))
+	}
+	return ""
+}
+
+func adminSubscriptionNotifySortKey(sub Subscription) string {
+	bands := normalizeNotificationBands(sub.NotifyBands, sub.NotifyRules)
+	parts := make([]string, 0, len(bands))
+	for _, band := range bands {
+		parts = append(parts, fmt.Sprintf("%03d:%03d:%s", band.Min, band.Max, band.Level))
+	}
+	return strings.Join(parts, "|")
 }
 
 func parseAdminFilterDate(value string, exclusiveEnd bool) (time.Time, bool) {
@@ -548,7 +653,18 @@ func serveAdminDeleteSubscriptions(w http.ResponseWriter, r *http.Request, store
 
 func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
 	startedAt := time.Now()
-	subscriptions := store.List()
+	var request adminSubscriptionLivenessRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "测活范围格式错误"})
+		return
+	}
+	if len(request.BarkIDs) > 10000 {
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "每次最多测活 10000 个选中订阅"})
+		return
+	}
+	subscriptions, scope, notFound := adminLivenessSubscriptions(cfg, store.List(), request)
 	selfHostedTotal := 0
 	for _, sub := range subscriptions {
 		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
@@ -596,10 +712,11 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		officialNotChecked++
 	}
 	healthy := selfHostedMissing == 0 && invalid == 0
-	log.Printf("admin subscription liveness total=%d self_hosted=%d alive=%d missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
-		len(subscriptions), selfHostedTotal, selfHostedAlive, selfHostedMissing, officialNotChecked, invalid, time.Since(startedAt), clientIP(r))
+	log.Printf("admin subscription liveness scope=%s total=%d not_found=%d self_hosted=%d alive=%d missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
+		scope, len(subscriptions), notFound, selfHostedTotal, selfHostedAlive, selfHostedMissing, officialNotChecked, invalid, time.Since(startedAt), clientIP(r))
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "无推送测活完成", Data: map[string]any{
 		"healthy":                    healthy,
+		"scope":                      scope,
 		"checked_at":                 time.Now().UTC().Format(time.RFC3339),
 		"duration_ms":                time.Since(startedAt).Milliseconds(),
 		"total_subscriptions":        len(subscriptions),
@@ -613,8 +730,35 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		"issues":                     issues,
 		"issues_truncated":           issueTotal > len(issues),
 		"notification_sent":          false,
+		"selected_not_found":         notFound,
 		"official_check_explanation": "官方 Bark 不提供无推送 Key 校验接口，因此仅统计、不发送测试消息。",
 	}})
+}
+
+func adminLivenessSubscriptions(cfg Config, subscriptions []Subscription, request adminSubscriptionLivenessRequest) ([]Subscription, string, int) {
+	if len(request.BarkIDs) == 0 {
+		return filterAdminSubscriptions(cfg, subscriptions, request.adminSubscriptionFilter), "filtered", 0
+	}
+	byKey := make(map[string]Subscription, len(subscriptions))
+	for _, sub := range subscriptions {
+		byKey[sub.BarkID] = sub
+	}
+	selected := make([]Subscription, 0, len(request.BarkIDs))
+	seen := make(map[string]bool, len(request.BarkIDs))
+	notFound := 0
+	for _, rawKey := range request.BarkIDs {
+		key := strings.TrimSpace(rawKey)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if sub, ok := byKey[key]; ok {
+			selected = append(selected, sub)
+		} else {
+			notFound++
+		}
+	}
+	return selected, "selected", notFound
 }
 
 func loadSelfHostedBarkKeys(cfg Config) (map[string]struct{}, error) {
@@ -794,17 +938,54 @@ func listDeliveryAuditSummaries(cfg Config, limit int) ([]adminAuditSummary, int
 
 func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []adminAuditEventGroup {
 	historyIndex := auditHistoryIndex(cfg)
-	groups := make(map[string][]adminAuditSummary)
+	exactGroups := make(map[string][]adminAuditSummary)
 	for _, report := range reports {
 		enrichAuditSummary(&report.deliveryAuditSummary, historyIndex)
-		key := strings.ToLower(strings.TrimSpace(report.Type)) + "|" + strings.ToLower(strings.TrimSpace(report.EventID))
-		if strings.Trim(key, "|") == "" {
-			key = report.ID
-		}
-		groups[key] = append(groups[key], report)
+		key := auditExactEventKey(report)
+		exactGroups[key] = append(exactGroups[key], report)
 	}
-	result := make([]adminAuditEventGroup, 0, len(groups))
-	for key, groupReports := range groups {
+	exactKeys := make([]string, 0, len(exactGroups))
+	for key := range exactGroups {
+		exactKeys = append(exactKeys, key)
+	}
+	sort.Strings(exactKeys)
+	clusters := make([][]adminAuditSummary, 0, len(exactKeys))
+	for _, key := range exactKeys {
+		clusters = append(clusters, exactGroups[key])
+	}
+	parents := make([]int, len(clusters))
+	rootReports := make([][]adminAuditSummary, len(clusters))
+	for index := range parents {
+		parents[index] = index
+		rootReports[index] = append([]adminAuditSummary(nil), clusters[index]...)
+	}
+	var find func(int) int
+	find = func(index int) int {
+		if parents[index] != index {
+			parents[index] = find(parents[index])
+		}
+		return parents[index]
+	}
+	for left := 0; left < len(clusters); left++ {
+		for right := left + 1; right < len(clusters); right++ {
+			leftRoot, rightRoot := find(left), find(right)
+			if leftRoot == rightRoot || auditReportGroupsSourceConflict(rootReports[leftRoot], rootReports[rightRoot]) {
+				continue
+			}
+			if auditReportGroupsSameEarthquake(rootReports[leftRoot], rootReports[rightRoot]) {
+				parents[rightRoot] = leftRoot
+				rootReports[leftRoot] = append(rootReports[leftRoot], rootReports[rightRoot]...)
+				rootReports[rightRoot] = nil
+			}
+		}
+	}
+	merged := make(map[int][]adminAuditSummary)
+	for index, cluster := range clusters {
+		root := find(index)
+		merged[root] = append(merged[root], cluster...)
+	}
+	result := make([]adminAuditEventGroup, 0, len(merged))
+	for _, groupReports := range merged {
 		sort.Slice(groupReports, func(i, j int) bool {
 			if !groupReports[i].Modified.Equal(groupReports[j].Modified) {
 				return groupReports[i].Modified.After(groupReports[j].Modified)
@@ -812,11 +993,16 @@ func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []admi
 			return groupReports[i].ReportNum > groupReports[j].ReportNum
 		})
 		latest := groupReports[0]
+		sources := auditGroupSources(groupReports)
+		eventIDs := auditGroupEventIDs(groupReports)
+		identity := auditGroupIdentity(groupReports)
 		group := adminAuditEventGroup{
-			ID:            hashKey(key)[:16],
+			ID:            hashKey(identity)[:16],
 			EventID:       latest.EventID,
+			EventIDs:      eventIDs,
 			Type:          latest.Type,
-			Source:        strings.TrimSuffix(strings.ToUpper(latest.Type), "_EEW"),
+			Source:        strings.Join(sources, " / "),
+			Sources:       sources,
 			OriginTime:    latest.OriginTime,
 			Hypocenter:    latest.Hypocenter,
 			Latitude:      latest.Latitude,
@@ -864,6 +1050,13 @@ func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []admi
 			group.Final = group.Final || report.Final
 			group.Cancel = group.Cancel || report.Cancel
 		}
+		if group.Hypocenter != "" {
+			group.Title = group.Hypocenter
+		} else if group.Source != "" {
+			group.Title = group.Source + "地震预警"
+		} else {
+			group.Title = "地震预警"
+		}
 		result = append(result, group)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -872,8 +1065,151 @@ func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []admi
 	return result
 }
 
-func auditHistoryIndex(cfg Config) map[string]HistoryRecord {
-	index := make(map[string]HistoryRecord)
+func auditExactEventKey(report adminAuditSummary) string {
+	key := strings.ToLower(strings.TrimSpace(report.Type)) + "|" + strings.ToLower(strings.TrimSpace(report.EventID))
+	if strings.Trim(key, "|") == "" {
+		return report.ID
+	}
+	return key
+}
+
+func auditReportGroupsSameEarthquake(left, right []adminAuditSummary) bool {
+	for _, leftReport := range left {
+		for _, rightReport := range right {
+			if auditReportsSameEarthquake(leftReport, rightReport) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func auditReportGroupsSourceConflict(left, right []adminAuditSummary) bool {
+	types := make(map[string]bool)
+	for _, report := range left {
+		types[strings.ToLower(strings.TrimSpace(report.Type))] = true
+	}
+	for _, report := range right {
+		if types[strings.ToLower(strings.TrimSpace(report.Type))] {
+			return true
+		}
+	}
+	return false
+}
+
+func auditReportsSameEarthquake(left, right adminAuditSummary) bool {
+	leftType := strings.ToLower(strings.TrimSpace(left.Type))
+	rightType := strings.ToLower(strings.TrimSpace(right.Type))
+	if leftType == rightType {
+		return false
+	}
+	leftTime := parseTimeInZone(left.OriginTime, 8*60*60)
+	rightTime := parseTimeInZone(right.OriginTime, 8*60*60)
+	if leftTime.IsZero() || rightTime.IsZero() {
+		return false
+	}
+	delta := leftTime.Sub(rightTime)
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > 15*time.Second {
+		return false
+	}
+	if left.EventID != "" && strings.EqualFold(left.EventID, right.EventID) {
+		return true
+	}
+	if left.Magnitude > 0 && right.Magnitude > 0 && math.Abs(left.Magnitude-right.Magnitude) > 1.0 {
+		return false
+	}
+	leftHasCoordinates := validSubscriptionCoordinate(left.Latitude, left.Longitude)
+	rightHasCoordinates := validSubscriptionCoordinate(right.Latitude, right.Longitude)
+	if leftHasCoordinates && rightHasCoordinates {
+		return haversineKM(left.Latitude, left.Longitude, right.Latitude, right.Longitude) <= 120
+	}
+	leftHypocenter := normalizeAuditHypocenter(left.Hypocenter)
+	rightHypocenter := normalizeAuditHypocenter(right.Hypocenter)
+	if leftHypocenter != "" && rightHypocenter != "" {
+		if strings.Contains(leftHypocenter, rightHypocenter) || strings.Contains(rightHypocenter, leftHypocenter) {
+			return true
+		}
+		return delta <= 3*time.Second
+	}
+	return delta <= 12*time.Second
+}
+
+func normalizeAuditHypocenter(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(" ", "", "　", "", "地震", "", "附近", "", "地区", "", "地方", "")
+	return replacer.Replace(value)
+}
+
+func auditGroupIdentity(reports []adminAuditSummary) string {
+	keys := make([]string, 0, len(reports))
+	seen := make(map[string]bool)
+	for _, report := range reports {
+		key := auditExactEventKey(report)
+		if !seen[key] {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "+")
+}
+
+func auditGroupEventIDs(reports []adminAuditSummary) []string {
+	values := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, report := range reports {
+		value := strings.TrimSpace(report.EventID)
+		key := strings.ToLower(value)
+		if value != "" && !seen[key] {
+			seen[key] = true
+			values = append(values, value)
+		}
+	}
+	sort.Strings(values)
+	return values
+}
+
+func auditGroupSources(reports []adminAuditSummary) []string {
+	values := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, report := range reports {
+		value := auditSourceName(report.Type)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			values = append(values, value)
+		}
+	}
+	sort.Strings(values)
+	return values
+}
+
+func auditSourceName(eventType string) string {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "jma_eew":
+		return "日本气象厅"
+	case "jma_eew_test":
+		return "日本气象厅测试源"
+	case "cenc_eew":
+		return "中国地震台网"
+	case "cq_eew":
+		return "重庆地震局"
+	case "sc_eew":
+		return "四川地震局"
+	case "fj_eew":
+		return "福建地震局"
+	case "cwa_eew":
+		return "台湾气象署"
+	default:
+		value := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(eventType)), "_EEW")
+		return strings.ReplaceAll(value, "_", " ")
+	}
+}
+
+func auditHistoryIndex(cfg Config) auditHistoryLookup {
+	lookup := auditHistoryLookup{ByID: make(map[string]HistoryRecord)}
 	records := builtinHistoryRecords()
 	if cache, err := loadHistoryCache(cfg.Server.HistoryPath); err == nil {
 		records = append(records, cache.Records...)
@@ -882,21 +1218,90 @@ func auditHistoryIndex(cfg Config) map[string]HistoryRecord {
 		for _, key := range []string{record.EventID, record.Key} {
 			key = strings.ToLower(strings.TrimSpace(key))
 			if key != "" {
-				index[key] = record
+				sourceKey := strings.ToLower(strings.TrimSpace(record.Source)) + "|" + key
+				lookup.ByID[sourceKey] = record
+				if _, exists := lookup.ByID[key]; !exists {
+					lookup.ByID[key] = record
+				}
 			}
 		}
+		if originTime := auditHistoryOriginTime(record); !originTime.IsZero() {
+			lookup.Candidates = append(lookup.Candidates, auditHistoryCandidate{Record: record, OriginTime: originTime})
+		}
 	}
-	return index
+	return lookup
 }
 
-func enrichAuditSummary(summary *deliveryAuditSummary, historyIndex map[string]HistoryRecord) {
+func auditHistoryOriginTime(record HistoryRecord) time.Time {
+	offset := 8 * 60 * 60
+	if strings.EqualFold(record.Source, "jma") {
+		offset = 9 * 60 * 60
+	}
+	return parseTimeInZone(record.OriginTime, offset)
+}
+
+func auditHistorySource(eventType string) string {
+	value := strings.ToLower(strings.TrimSpace(eventType))
+	if strings.HasPrefix(value, "jma_") {
+		return "jma"
+	}
+	if strings.HasPrefix(value, "cenc_") || strings.HasPrefix(value, "cq_") || strings.HasPrefix(value, "sc_") || strings.HasPrefix(value, "fj_") {
+		return "cenc"
+	}
+	return ""
+}
+
+func enrichAuditSummary(summary *deliveryAuditSummary, historyIndex auditHistoryLookup) {
 	if summary == nil {
 		return
 	}
-	record, ok := historyIndex[strings.ToLower(strings.TrimSpace(summary.EventID))]
-	if !ok {
-		return
+	eventID := strings.ToLower(strings.TrimSpace(summary.EventID))
+	expectedSource := auditHistorySource(summary.Type)
+	record, ok := historyIndex.ByID[expectedSource+"|"+eventID]
+	if !ok && expectedSource == "" {
+		record, ok = historyIndex.ByID[eventID]
 	}
+	if !ok {
+		record, ok = nearestAuditHistoryRecord(*summary, expectedSource, historyIndex.Candidates)
+	}
+	if ok {
+		applyAuditHistoryRecord(summary, record)
+	}
+}
+
+func nearestAuditHistoryRecord(summary deliveryAuditSummary, expectedSource string, candidates []auditHistoryCandidate) (HistoryRecord, bool) {
+	originTime := parseTimeInZone(summary.OriginTime, 8*60*60)
+	if originTime.IsZero() || expectedSource == "" {
+		return HistoryRecord{}, false
+	}
+	bestDelta := 31 * time.Second
+	var best HistoryRecord
+	found := false
+	for _, candidate := range candidates {
+		if !strings.EqualFold(candidate.Record.Source, expectedSource) {
+			continue
+		}
+		delta := originTime.Sub(candidate.OriginTime)
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta >= bestDelta {
+			continue
+		}
+		if summary.Magnitude > 0 && candidate.Record.Magnitude > 0 && math.Abs(summary.Magnitude-candidate.Record.Magnitude) > 1.0 {
+			continue
+		}
+		if validSubscriptionCoordinate(summary.Latitude, summary.Longitude) && validSubscriptionCoordinate(candidate.Record.Latitude, candidate.Record.Longitude) && haversineKM(summary.Latitude, summary.Longitude, candidate.Record.Latitude, candidate.Record.Longitude) > 150 {
+			continue
+		}
+		bestDelta = delta
+		best = candidate.Record
+		found = true
+	}
+	return best, found
+}
+
+func applyAuditHistoryRecord(summary *deliveryAuditSummary, record HistoryRecord) {
 	if summary.Hypocenter == "" {
 		summary.Hypocenter = record.Hypocenter
 	}
