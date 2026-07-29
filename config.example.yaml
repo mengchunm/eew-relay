@@ -78,7 +78,15 @@ wolfx:
 
 alert:
   push_updates: true
+  # Kept for compatibility. Updates are now decided by meaningful earthquake
+  # revisions rather than report-number gaps.
   update_min_report_gap: 1
+  # Reports from different agencies are correlated into one physical earthquake.
+  # A later report is pushed only when one of these material thresholds is met.
+  revision_magnitude_delta: 0.3
+  revision_epicenter_km: 10
+  revision_depth_km: 10
+  revision_origin_seconds: 3
   ignore_training: true
   ignore_cancel: true
   s_wave_km_s: 3.5

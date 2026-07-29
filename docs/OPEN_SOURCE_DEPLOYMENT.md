@@ -50,6 +50,7 @@ chmod 700 data
 - `server.public_url`；
 - `server.subscription_paused` 与 `server.subscription_limit`；
 - `wolfx.websocket_url`，正常部署保持真实 Wolfx 数据源；
+- `alert.revision_*` 跨台站事件修订阈值；未配置时使用示例文件中的保守默认值；
 - PostgreSQL 密码和 Bark 设备库只读连接；
 - 反向代理的 HTTPS、请求头和真实客户端 IP 配置。
 

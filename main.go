@@ -131,27 +131,31 @@ type WolfxConfig struct {
 }
 
 type AlertConfig struct {
-	PushUpdates           bool    `yaml:"push_updates"`
-	UpdateMinReportGap    int     `yaml:"update_min_report_gap"`
-	IgnoreTraining        bool    `yaml:"ignore_training"`
-	IgnoreCancel          bool    `yaml:"ignore_cancel"`
-	SWaveKMS              float64 `yaml:"s_wave_km_s"`
-	PWaveKMS              float64 `yaml:"p_wave_km_s"`
-	StaleOriginSecond     int     `yaml:"stale_origin_seconds"`
-	DedupKeepMinutes      int     `yaml:"dedup_keep_minutes"`
-	MaxDistanceKM         float64 `yaml:"max_distance_km"`
-	DefaultMinIntensity   int     `yaml:"default_min_intensity"`
-	FanoutConcurrency     int     `yaml:"fanout_concurrency"`
-	SelfHostedConcurrency int     `yaml:"self_hosted_fanout_concurrency"`
-	FanoutErrorBudget     int     `yaml:"fanout_error_budget"`
-	KeyFailureThreshold   int     `yaml:"key_failure_threshold"`
-	KeyQuarantineMinute   int     `yaml:"key_quarantine_minutes"`
-	SendRetryAttempts     int     `yaml:"send_retry_attempts"`
-	SendRetryDelayMS      int     `yaml:"send_retry_delay_ms"`
-	AlertDetailTTLHours   int     `yaml:"alert_detail_ttl_hours"`
-	AlertDetailMaxItems   int     `yaml:"alert_detail_max_items"`
-	ClickURL              string  `yaml:"click_url"`
-	WeChatURL             string  `yaml:"wechat_url"`
+	PushUpdates            bool    `yaml:"push_updates"`
+	UpdateMinReportGap     int     `yaml:"update_min_report_gap"`
+	RevisionMagnitudeDelta float64 `yaml:"revision_magnitude_delta"`
+	RevisionEpicenterKM    float64 `yaml:"revision_epicenter_km"`
+	RevisionDepthKM        float64 `yaml:"revision_depth_km"`
+	RevisionOriginSeconds  int     `yaml:"revision_origin_seconds"`
+	IgnoreTraining         bool    `yaml:"ignore_training"`
+	IgnoreCancel           bool    `yaml:"ignore_cancel"`
+	SWaveKMS               float64 `yaml:"s_wave_km_s"`
+	PWaveKMS               float64 `yaml:"p_wave_km_s"`
+	StaleOriginSecond      int     `yaml:"stale_origin_seconds"`
+	DedupKeepMinutes       int     `yaml:"dedup_keep_minutes"`
+	MaxDistanceKM          float64 `yaml:"max_distance_km"`
+	DefaultMinIntensity    int     `yaml:"default_min_intensity"`
+	FanoutConcurrency      int     `yaml:"fanout_concurrency"`
+	SelfHostedConcurrency  int     `yaml:"self_hosted_fanout_concurrency"`
+	FanoutErrorBudget      int     `yaml:"fanout_error_budget"`
+	KeyFailureThreshold    int     `yaml:"key_failure_threshold"`
+	KeyQuarantineMinute    int     `yaml:"key_quarantine_minutes"`
+	SendRetryAttempts      int     `yaml:"send_retry_attempts"`
+	SendRetryDelayMS       int     `yaml:"send_retry_delay_ms"`
+	AlertDetailTTLHours    int     `yaml:"alert_detail_ttl_hours"`
+	AlertDetailMaxItems    int     `yaml:"alert_detail_max_items"`
+	ClickURL               string  `yaml:"click_url"`
+	WeChatURL              string  `yaml:"wechat_url"`
 }
 
 type AlertPage struct {
@@ -351,22 +355,25 @@ type APIResponse struct {
 type RawEvent map[string]any
 
 type Event struct {
-	Type          string
-	EventID       string
-	ReportNum     int
-	OriginTime    time.Time
-	AnnouncedTime time.Time
-	Hypocenter    string
-	Latitude      float64
-	Longitude     float64
-	Magnitude     float64
-	DepthKM       float64
-	MaxIntensity  string
-	Final         bool
-	Cancel        bool
-	Training      bool
-	Serial        string
-	Raw           RawEvent
+	Type           string
+	EventID        string
+	ReportNum      int
+	OriginTime     time.Time
+	AnnouncedTime  time.Time
+	Hypocenter     string
+	Latitude       float64
+	Longitude      float64
+	Magnitude      float64
+	DepthKM        float64
+	MaxIntensity   string
+	Final          bool
+	Cancel         bool
+	Training       bool
+	Serial         string
+	Raw            RawEvent
+	CanonicalID    string
+	Revision       bool
+	RevisionFields []string
 }
 
 type HistoryRecord struct {
@@ -460,14 +467,27 @@ type keyFailure struct {
 }
 
 type Deduper struct {
-	mu      sync.Mutex
-	seen    map[string]seenEvent
-	keepFor time.Duration
+	mu       sync.Mutex
+	states   map[string]*earthquakeState
+	bySource map[string]string
+	keepFor  time.Duration
 }
 
-type seenEvent struct {
-	ReportNum int
-	At        time.Time
+type earthquakeState struct {
+	ID           string
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	Latest       Event
+	LastPushed   Event
+	SourceEvents map[string]string
+	SourceLatest map[string]Event
+}
+
+type earthquakeDispatchDecision struct {
+	Dispatch    bool
+	First       bool
+	CanonicalID string
+	Reasons     []string
 }
 
 func main() {
@@ -651,6 +671,18 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Alert.UpdateMinReportGap <= 0 {
 		cfg.Alert.UpdateMinReportGap = 1
+	}
+	if cfg.Alert.RevisionMagnitudeDelta <= 0 {
+		cfg.Alert.RevisionMagnitudeDelta = 0.3
+	}
+	if cfg.Alert.RevisionEpicenterKM <= 0 {
+		cfg.Alert.RevisionEpicenterKM = 10
+	}
+	if cfg.Alert.RevisionDepthKM <= 0 {
+		cfg.Alert.RevisionDepthKM = 10
+	}
+	if cfg.Alert.RevisionOriginSeconds <= 0 {
+		cfg.Alert.RevisionOriginSeconds = 3
 	}
 	if cfg.Alert.MaxDistanceKM <= 0 {
 		cfg.Alert.MaxDistanceKM = 1000
@@ -3841,7 +3873,7 @@ func run(ctx context.Context, cfg Config, notifier *Notifier, deduper *Deduper, 
 			if !ok {
 				return
 			}
-			handlePayload(workerCtx, cfg, notifier, deduper, store, alertCache, item.data)
+			handlePayload(workerCtx, cfg, notifier, deduper, store, alertCache, item.data, item.enqueuedAt)
 			health.SetEventProcessed(time.Now())
 		}
 	}()
@@ -3959,7 +3991,7 @@ func listenOnce(ctx context.Context, cfg Config, queue *eventPayloadQueue, healt
 	}
 }
 
-func handlePayload(ctx context.Context, cfg Config, notifier *Notifier, deduper *Deduper, store *Store, alertCache *AlertCache, payload []byte) {
+func handlePayload(ctx context.Context, cfg Config, notifier *Notifier, deduper *Deduper, store *Store, alertCache *AlertCache, payload []byte, receivedTimes ...time.Time) {
 	event, ok, err := parseEvent(payload)
 	if err != nil {
 		log.Printf("parse skipped: %v raw=%s", err, compact(payload, 512))
@@ -3976,12 +4008,6 @@ func handlePayload(ctx context.Context, cfg Config, notifier *Notifier, deduper 
 		log.Printf("ignored cancel event id=%s type=%s", event.EventID, event.Type)
 		return
 	}
-	if !cfg.Alert.PushUpdates && deduper.Seen(event.Key(), event.ReportNum, 999999) {
-		return
-	}
-	if cfg.Alert.PushUpdates && deduper.Seen(event.Key(), event.ReportNum, cfg.Alert.UpdateMinReportGap) {
-		return
-	}
 
 	now := time.Now()
 	if event.OriginTime.IsZero() {
@@ -3991,9 +4017,18 @@ func handlePayload(ctx context.Context, cfg Config, notifier *Notifier, deduper 
 		return
 	}
 
-	receivedAt := time.Now()
-	log.Printf("event received id=%s report=%d type=%s received_at=%s origin=%s subscriptions=%d",
-		event.EventID, event.ReportNum, event.Type, formatBeijing(receivedAt, time.RFC3339Nano), formatBeijing(event.OriginTime, time.RFC3339), store.Count())
+	receivedAt := now
+	if len(receivedTimes) > 0 && !receivedTimes[0].IsZero() {
+		receivedAt = receivedTimes[0]
+	}
+	event, correlation := deduper.Evaluate(event, cfg.Alert, receivedAt)
+	if !correlation.Dispatch {
+		log.Printf("event suppressed as same earthquake id=%s report=%d type=%s canonical=%s reason=no_meaningful_revision",
+			event.EventID, event.ReportNum, event.Type, correlation.CanonicalID)
+		return
+	}
+	log.Printf("event received id=%s report=%d type=%s canonical=%s first=%t revision_fields=%s received_at=%s origin=%s subscriptions=%d",
+		event.EventID, event.ReportNum, event.Type, correlation.CanonicalID, correlation.First, strings.Join(correlation.Reasons, ","), formatBeijing(receivedAt, time.RFC3339Nano), formatBeijing(event.OriginTime, time.RFC3339), store.Count())
 	pushed, skipped, failed := dispatchEvent(ctx, cfg, notifier, store, alertCache, event, receivedAt)
 	log.Printf("event id=%s report=%d type=%s fanout pushed=%d skipped=%d failed=%d total=%d",
 		event.EventID, event.ReportNum, event.Type, pushed, skipped, failed, store.Count())
@@ -4209,7 +4244,11 @@ func buildFanoutTarget(cfg Config, event Event, alertCache *AlertCache, sub Subs
 }
 
 func pushNotificationID(event Event) string {
-	sum := sha256.Sum256([]byte(event.EventID + "|" + event.Type))
+	identity := strings.TrimSpace(event.CanonicalID)
+	if identity == "" {
+		identity = event.EventID + "|" + event.Type
+	}
+	sum := sha256.Sum256([]byte(identity))
 	return "eew-" + hex.EncodeToString(sum[:8])
 }
 
@@ -5804,6 +5843,8 @@ func formatAlert(event Event, d Decision, sub Subscription) (string, string, str
 		title = fmt.Sprintf("地震警报测试 %s", eta)
 	} else if isHistoryTestEvent(event) {
 		title = fmt.Sprintf("历史地震复现测试 %s", eta)
+	} else if event.Revision {
+		title = fmt.Sprintf("地震警报修订 %s", eta)
 	}
 	intensityRank := intensityRank(d.EstimatedIntensity)
 	subtitle := fmt.Sprintf("M%.1f 预计烈度 %.1f（%s）", event.Magnitude, d.EstimatedIntensity, intensityDescription(intensityRank))
@@ -5813,6 +5854,8 @@ func formatAlert(event Event, d Decision, sub Subscription) (string, string, str
 		lines = append(lines, "[测试] 这是一条模拟预警，不是真实地震。")
 	case isHistoryTestEvent(event):
 		lines = append(lines, "[历史复现测试] 这是一条使用历史数据生成的测试通知，不是当前发生的地震。")
+	case event.Revision:
+		lines = append(lines, "[修订] "+earthquakeRevisionLabel(event.RevisionFields)+"发生显著变化，以下为最新信息。")
 	}
 	notifyLevel := notifyLevelForEvent(event, sub, d)
 	lines = append(lines,
@@ -5828,6 +5871,38 @@ func formatAlert(event Event, d Decision, sub Subscription) (string, string, str
 	)
 	lines = append(lines, "发震: "+alertOriginTimeLabel(event))
 	return title, subtitle, strings.Join(lines, "\n")
+}
+
+func earthquakeRevisionLabel(fields []string) string {
+	labels := make([]string, 0, len(fields))
+	seen := make(map[string]bool)
+	for _, field := range fields {
+		label := ""
+		switch field {
+		case "cancellation":
+			label = "取消状态"
+		case "origin_time":
+			label = "发震时间"
+		case "epicenter":
+			label = "震中位置"
+		case "magnitude":
+			label = "震级"
+		case "depth":
+			label = "震源深度"
+		case "max_intensity":
+			label = "最大烈度"
+		case "hypocenter":
+			label = "震中名称"
+		}
+		if label != "" && !seen[label] {
+			seen[label] = true
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return "地震信息"
+	}
+	return strings.Join(labels, "、")
 }
 
 func intensityDescription(rank int) string {
@@ -6217,24 +6292,354 @@ func retryableBarkError(err error) bool {
 }
 
 func NewDeduper(keepFor time.Duration) *Deduper {
-	return &Deduper{seen: make(map[string]seenEvent), keepFor: keepFor}
+	if keepFor <= 0 {
+		keepFor = 2 * time.Hour
+	}
+	return &Deduper{
+		states:   make(map[string]*earthquakeState),
+		bySource: make(map[string]string),
+		keepFor:  keepFor,
+	}
 }
 
-func (d *Deduper) Seen(key string, reportNum int, minGap int) bool {
+func (d *Deduper) Evaluate(event Event, cfg AlertConfig, receivedAt time.Time) (Event, earthquakeDispatchDecision) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	now := time.Now()
-	for k, v := range d.seen {
-		if now.Sub(v.At) > d.keepFor {
-			delete(d.seen, k)
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	d.cleanupLocked(receivedAt)
+
+	state := d.exactStateLocked(event)
+	if state == nil {
+		state = d.physicalStateLocked(event)
+	}
+	if state == nil {
+		canonicalID := canonicalEarthquakeID(event)
+		for suffix := 2; d.states[canonicalID] != nil; suffix++ {
+			canonicalID = fmt.Sprintf("%s-%d", canonicalEarthquakeID(event), suffix)
+		}
+		event.CanonicalID = canonicalID
+		event.Revision = false
+		event.RevisionFields = nil
+		sourceType := normalizedEarthquakeSource(event.Type)
+		state = &earthquakeState{
+			ID:           canonicalID,
+			FirstSeen:    receivedAt,
+			LastSeen:     receivedAt,
+			Latest:       event,
+			LastPushed:   event,
+			SourceEvents: map[string]string{sourceType: event.EventID},
+			SourceLatest: map[string]Event{sourceType: event},
+		}
+		d.states[canonicalID] = state
+		d.indexSourceEventLocked(event, canonicalID)
+		return event, earthquakeDispatchDecision{Dispatch: true, First: true, CanonicalID: canonicalID}
+	}
+
+	effective := mergeEarthquakeEvent(state.Latest, event)
+	effective.CanonicalID = state.ID
+	reasons := meaningfulEarthquakeRevision(state.LastPushed, effective, cfg)
+	sourceType := normalizedEarthquakeSource(event.Type)
+	state.LastSeen = receivedAt
+	state.Latest = effective
+	state.SourceEvents[sourceType] = event.EventID
+	state.SourceLatest[sourceType] = effective
+	d.indexSourceEventLocked(event, state.ID)
+
+	dispatch := len(reasons) > 0 && (cfg.PushUpdates || state.LastPushed.Cancel != effective.Cancel)
+	if !dispatch {
+		effective.Revision = false
+		effective.RevisionFields = nil
+		return effective, earthquakeDispatchDecision{CanonicalID: state.ID, Reasons: reasons}
+	}
+	effective.Revision = true
+	effective.RevisionFields = append([]string(nil), reasons...)
+	state.LastPushed = effective
+	return effective, earthquakeDispatchDecision{Dispatch: true, CanonicalID: state.ID, Reasons: reasons}
+}
+
+func (d *Deduper) cleanupLocked(now time.Time) {
+	for id, state := range d.states {
+		if now.Sub(state.LastSeen) <= d.keepFor {
+			continue
+		}
+		delete(d.states, id)
+		for sourceType, eventID := range state.SourceEvents {
+			delete(d.bySource, earthquakeSourceEventKey(sourceType, eventID))
 		}
 	}
-	prev, ok := d.seen[key]
-	if ok && reportNum-prev.ReportNum < minGap {
-		return true
+}
+
+func (d *Deduper) exactStateLocked(event Event) *earthquakeState {
+	stateID := d.bySource[earthquakeSourceEventKey(event.Type, event.EventID)]
+	return d.states[stateID]
+}
+
+func (d *Deduper) physicalStateLocked(event Event) *earthquakeState {
+	scores := make(map[*earthquakeState]float64)
+	sourceType := normalizedEarthquakeSource(event.Type)
+	for _, state := range d.states {
+		if existingID, exists := state.SourceEvents[sourceType]; exists && !strings.EqualFold(strings.TrimSpace(existingID), strings.TrimSpace(event.EventID)) {
+			continue
+		}
+		for existingType, existing := range state.SourceLatest {
+			if existingType == sourceType {
+				continue
+			}
+			score, matches := physicalEarthquakeMatchScore(existing, event)
+			if !matches {
+				continue
+			}
+			if previousScore, exists := scores[state]; !exists || score < previousScore {
+				scores[state] = score
+			}
+		}
 	}
-	d.seen[key] = seenEvent{ReportNum: reportNum, At: now}
-	return false
+	var best, second *earthquakeState
+	bestScore, secondScore := math.MaxFloat64, math.MaxFloat64
+	for state, score := range scores {
+		if score < bestScore {
+			second, secondScore = best, bestScore
+			best, bestScore = state, score
+		} else if score < secondScore {
+			second, secondScore = state, score
+		}
+	}
+	// When two recent earthquakes fit almost equally well, a duplicate alert is
+	// safer than silently attaching this report to the wrong earthquake.
+	if second != nil && secondScore-bestScore < 20 {
+		return nil
+	}
+	return best
+}
+
+func (d *Deduper) indexSourceEventLocked(event Event, canonicalID string) {
+	key := earthquakeSourceEventKey(event.Type, event.EventID)
+	if strings.Trim(key, "|") != "" {
+		d.bySource[key] = canonicalID
+	}
+}
+
+func normalizedEarthquakeSource(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func earthquakeSourceEventKey(source, eventID string) string {
+	return normalizedEarthquakeSource(source) + "|" + strings.ToLower(strings.TrimSpace(eventID))
+}
+
+func canonicalEarthquakeID(event Event) string {
+	identity := earthquakeSourceEventKey(event.Type, event.EventID)
+	if strings.Trim(identity, "|") == "" {
+		identity = fmt.Sprintf("%.3f|%.3f|%s", event.Latitude, event.Longitude, event.OriginTime.UTC().Format(time.RFC3339Nano))
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return "quake-" + hex.EncodeToString(sum[:8])
+}
+
+func physicalEarthquakeMatchScore(left, right Event) (float64, bool) {
+	if normalizedEarthquakeSource(left.Type) == normalizedEarthquakeSource(right.Type) {
+		return 0, false
+	}
+	if left.OriginTime.IsZero() || right.OriginTime.IsZero() {
+		return 0, false
+	}
+	delta := math.Abs(left.OriginTime.Sub(right.OriginTime).Seconds())
+	if delta > 15 {
+		return 0, false
+	}
+	if left.EventID != "" && strings.EqualFold(strings.TrimSpace(left.EventID), strings.TrimSpace(right.EventID)) {
+		return -1000 + delta, true
+	}
+	if left.Magnitude > 0 && right.Magnitude > 0 && math.Abs(left.Magnitude-right.Magnitude) > 1.0 {
+		return 0, false
+	}
+	leftCoordinates := earthquakeHasCoordinates(left)
+	rightCoordinates := earthquakeHasCoordinates(right)
+	if leftCoordinates && rightCoordinates {
+		distance := haversineKM(left.Latitude, left.Longitude, right.Latitude, right.Longitude)
+		if distance > 120 {
+			return 0, false
+		}
+		return delta*10 + distance + math.Abs(left.Magnitude-right.Magnitude)*10, true
+	}
+	leftHypocenter := normalizeEarthquakeHypocenter(left.Hypocenter)
+	rightHypocenter := normalizeEarthquakeHypocenter(right.Hypocenter)
+	if leftHypocenter != "" && rightHypocenter != "" {
+		if strings.Contains(leftHypocenter, rightHypocenter) || strings.Contains(rightHypocenter, leftHypocenter) {
+			return delta * 10, true
+		}
+		if delta <= 3 {
+			return delta*10 + 100, true
+		}
+		return 0, false
+	}
+	if delta <= 12 {
+		return delta*10 + 200, true
+	}
+	return 0, false
+}
+
+func earthquakeHasCoordinates(event Event) bool {
+	return validCoordinate(event.Latitude, event.Longitude) && (event.Latitude != 0 || event.Longitude != 0)
+}
+
+func normalizeEarthquakeHypocenter(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(" ", "", "　", "", "地震", "", "附近", "", "地区", "", "地方", "")
+	return replacer.Replace(value)
+}
+
+func mergeEarthquakeEvent(previous, incoming Event) Event {
+	merged := incoming
+	if merged.OriginTime.IsZero() {
+		merged.OriginTime = previous.OriginTime
+	}
+	if merged.AnnouncedTime.IsZero() {
+		merged.AnnouncedTime = previous.AnnouncedTime
+	}
+	if !earthquakeHasCoordinates(merged) {
+		merged.Latitude = previous.Latitude
+		merged.Longitude = previous.Longitude
+	}
+	if merged.Magnitude <= 0 {
+		merged.Magnitude = previous.Magnitude
+	}
+	if merged.DepthKM == 0 && incoming.Cancel {
+		merged.DepthKM = previous.DepthKM
+	}
+	if strings.TrimSpace(merged.Hypocenter) == "" {
+		merged.Hypocenter = previous.Hypocenter
+	}
+	if strings.TrimSpace(merged.MaxIntensity) == "" {
+		merged.MaxIntensity = previous.MaxIntensity
+	}
+	return merged
+}
+
+func meaningfulEarthquakeRevision(previous, current Event, cfg AlertConfig) []string {
+	magnitudeDelta := cfg.RevisionMagnitudeDelta
+	if magnitudeDelta <= 0 {
+		magnitudeDelta = 0.3
+	}
+	epicenterKM := cfg.RevisionEpicenterKM
+	if epicenterKM <= 0 {
+		epicenterKM = 10
+	}
+	depthKM := cfg.RevisionDepthKM
+	if depthKM <= 0 {
+		depthKM = 10
+	}
+	originSeconds := cfg.RevisionOriginSeconds
+	if originSeconds <= 0 {
+		originSeconds = 3
+	}
+
+	reasons := make([]string, 0, 6)
+	if previous.Cancel != current.Cancel {
+		reasons = append(reasons, "cancellation")
+	}
+	if previous.OriginTime.IsZero() != current.OriginTime.IsZero() || (!previous.OriginTime.IsZero() && math.Abs(previous.OriginTime.Sub(current.OriginTime).Seconds())+1e-9 >= float64(originSeconds)) {
+		reasons = append(reasons, "origin_time")
+	}
+	previousCoordinates := earthquakeHasCoordinates(previous)
+	currentCoordinates := earthquakeHasCoordinates(current)
+	if !previousCoordinates && currentCoordinates || (previousCoordinates && currentCoordinates && haversineKM(previous.Latitude, previous.Longitude, current.Latitude, current.Longitude)+1e-9 >= epicenterKM) {
+		reasons = append(reasons, "epicenter")
+	}
+	if previous.Magnitude <= 0 && current.Magnitude > 0 || (previous.Magnitude > 0 && current.Magnitude > 0 && math.Abs(previous.Magnitude-current.Magnitude)+1e-9 >= magnitudeDelta) {
+		reasons = append(reasons, "magnitude")
+	}
+	if math.Abs(previous.DepthKM-current.DepthKM)+1e-9 >= depthKM {
+		reasons = append(reasons, "depth")
+	}
+	if maxIntensityMeaningfullyChanged(previous, current) {
+		reasons = append(reasons, "max_intensity")
+	}
+	if strings.TrimSpace(previous.Hypocenter) == "" && strings.TrimSpace(current.Hypocenter) != "" && !previousCoordinates {
+		reasons = append(reasons, "hypocenter")
+	}
+	return reasons
+}
+
+func maxIntensityMeaningfullyChanged(previous, current Event) bool {
+	previousValue := strings.TrimSpace(previous.MaxIntensity)
+	currentValue := strings.TrimSpace(current.MaxIntensity)
+	if previousValue == "" {
+		return currentValue != ""
+	}
+	if currentValue == "" {
+		return false
+	}
+	previousRank, previousOK := comparableMaxIntensity(previous)
+	currentRank, currentOK := comparableMaxIntensity(current)
+	if previousOK && currentOK {
+		return math.Abs(previousRank-currentRank) >= 0.49
+	}
+	return normalizedEarthquakeSource(previous.Type) == normalizedEarthquakeSource(current.Type) && !strings.EqualFold(normalizeIntensityText(previousValue), normalizeIntensityText(currentValue))
+}
+
+func comparableMaxIntensity(event Event) (float64, bool) {
+	value := normalizeIntensityText(event.MaxIntensity)
+	if value == "" || value == "未知" || value == "UNKNOWN" {
+		return 0, false
+	}
+	roman := map[string]int{"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10, "XI": 11, "XII": 12}
+	if level, ok := roman[value]; ok {
+		return chineseIntensityBand(level), true
+	}
+	source := normalizedEarthquakeSource(event.Type)
+	if strings.HasPrefix(source, "jma_") || strings.HasPrefix(source, "cwa_") {
+		switch value {
+		case "5-", "5弱":
+			return 5, true
+		case "5+", "5强", "5強":
+			return 5.5, true
+		case "6-", "6弱":
+			return 6, true
+		case "6+", "6强", "6強":
+			return 6.5, true
+		}
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	if strings.HasPrefix(source, "cenc_") || strings.HasPrefix(source, "cq_") || strings.HasPrefix(source, "sc_") || strings.HasPrefix(source, "fj_") {
+		return chineseIntensityBand(number), number >= 1 && number <= 12
+	}
+	if number >= 0 && number <= 7 {
+		return float64(number), true
+	}
+	return chineseIntensityBand(number), number >= 1 && number <= 12
+}
+
+func normalizeIntensityText(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(" ", "", "　", "", "震度", "", "烈度", "", "最大", "")
+	return replacer.Replace(value)
+}
+
+func chineseIntensityBand(level int) float64 {
+	switch {
+	case level <= 0:
+		return 0
+	case level <= 2:
+		return 1
+	case level == 3:
+		return 2
+	case level == 4:
+		return 3
+	case level <= 6:
+		return 4
+	case level == 7:
+		return 5
+	case level <= 9:
+		return 6
+	default:
+		return 7
+	}
 }
 
 func (e Event) Key() string {

@@ -2256,6 +2256,254 @@ func TestHTTPHealthRejectsStaleWebSocketData(t *testing.T) {
 	}
 }
 
+func TestEarthquakeDeduperPrefersFirstCrossSourceReport(t *testing.T) {
+	now := time.Now()
+	first := Event{
+		Type: "cenc_eew", EventID: "cenc-first", ReportNum: 1,
+		OriginTime: now.Add(-time.Minute), Hypocenter: "四川成都附近",
+		Latitude: 30.60, Longitude: 104.10, Magnitude: 5.0, DepthKM: 10, MaxIntensity: "VI",
+	}
+	later := Event{
+		Type: "cq_eew", EventID: "cq-later", ReportNum: 7,
+		OriginTime: first.OriginTime.Add(time.Second), AnnouncedTime: now,
+		Hypocenter: "成都市地区", Latitude: 30.61, Longitude: 104.11,
+		Magnitude: 5.1, DepthKM: 15, MaxIntensity: "6", Final: true, Serial: "7",
+	}
+	deduper := NewDeduper(2 * time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+
+	firstResult, firstDecision := deduper.Evaluate(first, cfg, now)
+	if !firstDecision.Dispatch || !firstDecision.First || firstResult.Type != "cenc_eew" {
+		t.Fatalf("first received source should win: event=%#v decision=%#v", firstResult, firstDecision)
+	}
+	laterResult, laterDecision := deduper.Evaluate(later, cfg, now.Add(time.Second))
+	if laterDecision.Dispatch || laterDecision.First {
+		t.Fatalf("source/report/final/minor physical differences should not push: event=%#v decision=%#v", laterResult, laterDecision)
+	}
+	if firstResult.CanonicalID == "" || laterResult.CanonicalID != firstResult.CanonicalID {
+		t.Fatalf("expected a shared physical earthquake id: first=%q later=%q", firstResult.CanonicalID, laterResult.CanonicalID)
+	}
+	if pushNotificationID(firstResult) != pushNotificationID(laterResult) {
+		t.Fatal("cross-source reports should share the Bark notification id")
+	}
+}
+
+func TestEarthquakeDeduperAccumulatesChangesAgainstLastPushedVersion(t *testing.T) {
+	now := time.Now()
+	base := Event{
+		Type: "cenc_eew", EventID: "magnitude-revision", ReportNum: 1,
+		OriginTime: now, Latitude: 30.6, Longitude: 104.1,
+		Magnitude: 5.0, DepthKM: 10, MaxIntensity: "VI",
+	}
+	deduper := NewDeduper(2 * time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	if _, decision := deduper.Evaluate(base, cfg, now); !decision.Dispatch {
+		t.Fatal("initial report was not dispatched")
+	}
+
+	minor := base
+	minor.ReportNum = 2
+	minor.Magnitude = 5.1
+	if _, decision := deduper.Evaluate(minor, cfg, now.Add(time.Second)); decision.Dispatch {
+		t.Fatalf("minor magnitude correction should not dispatch: %#v", decision)
+	}
+	accumulated := minor
+	accumulated.ReportNum = 3
+	accumulated.Magnitude = 5.3
+	result, decision := deduper.Evaluate(accumulated, cfg, now.Add(2*time.Second))
+	if !decision.Dispatch || !result.Revision || !containsString(decision.Reasons, "magnitude") {
+		t.Fatalf("cumulative material correction should dispatch: event=%#v decision=%#v", result, decision)
+	}
+	if result.Magnitude != 5.3 {
+		t.Fatalf("revision did not preserve corrected magnitude: %#v", result)
+	}
+}
+
+func TestEarthquakeDeduperIgnoresEquivalentAgencyIntensityScales(t *testing.T) {
+	now := time.Now()
+	base := Event{
+		Type: "cenc_eew", EventID: "china-scale", OriginTime: now,
+		Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10, MaxIntensity: "VI",
+	}
+	jma := Event{
+		Type: "jma_eew", EventID: "jma-scale", OriginTime: now.Add(time.Second),
+		Latitude: 30.01, Longitude: 104.01, Magnitude: 5, DepthKM: 10, MaxIntensity: "4",
+	}
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	deduper.Evaluate(base, cfg, now)
+	if _, decision := deduper.Evaluate(jma, cfg, now.Add(time.Second)); decision.Dispatch {
+		t.Fatalf("equivalent CENC/JMA intensity representations should not dispatch: %#v", decision)
+	}
+	jma.ReportNum = 2
+	jma.MaxIntensity = "5弱"
+	result, decision := deduper.Evaluate(jma, cfg, now.Add(2*time.Second))
+	if !decision.Dispatch || !containsString(decision.Reasons, "max_intensity") || !result.Revision {
+		t.Fatalf("material max-intensity correction should dispatch: event=%#v decision=%#v", result, decision)
+	}
+}
+
+func TestEarthquakeDeduperKeepsSameSourceEventIDsSeparate(t *testing.T) {
+	now := time.Now()
+	first := Event{Type: "cenc_eew", EventID: "quake-a", OriginTime: now, Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10}
+	second := first
+	second.EventID = "quake-b"
+	second.OriginTime = now.Add(time.Second)
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	firstResult, _ := deduper.Evaluate(first, cfg, now)
+	secondResult, decision := deduper.Evaluate(second, cfg, now.Add(time.Second))
+	if !decision.Dispatch || !decision.First || firstResult.CanonicalID == secondResult.CanonicalID {
+		t.Fatalf("same-source distinct ids must remain separate: event=%#v decision=%#v", secondResult, decision)
+	}
+}
+
+func TestEarthquakeDeduperDoesNotMergeDistantCrossSourceEvents(t *testing.T) {
+	now := time.Now()
+	first := Event{Type: "cenc_eew", EventID: "west", OriginTime: now, Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10}
+	second := Event{Type: "jma_eew", EventID: "east", OriginTime: now.Add(time.Second), Latitude: 32, Longitude: 106, Magnitude: 5, DepthKM: 10}
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	firstResult, _ := deduper.Evaluate(first, cfg, now)
+	secondResult, decision := deduper.Evaluate(second, cfg, now.Add(time.Second))
+	if !decision.Dispatch || !decision.First || firstResult.CanonicalID == secondResult.CanonicalID {
+		t.Fatalf("distant earthquakes were incorrectly merged: event=%#v decision=%#v", secondResult, decision)
+	}
+}
+
+func TestEarthquakeDeduperDoesNotGuessBetweenAmbiguousNearbyEvents(t *testing.T) {
+	now := time.Now()
+	left := Event{Type: "cenc_eew", EventID: "nearby-left", OriginTime: now, Latitude: 30, Longitude: 104.0, Magnitude: 5, DepthKM: 10}
+	right := Event{Type: "cenc_eew", EventID: "nearby-right", OriginTime: now.Add(time.Second), Latitude: 30, Longitude: 104.2, Magnitude: 5, DepthKM: 10}
+	ambiguous := Event{Type: "jma_eew", EventID: "ambiguous", OriginTime: now.Add(time.Second), Latitude: 30, Longitude: 104.1, Magnitude: 5, DepthKM: 10}
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	leftResult, _ := deduper.Evaluate(left, cfg, now)
+	rightResult, _ := deduper.Evaluate(right, cfg, now.Add(time.Second))
+	ambiguousResult, decision := deduper.Evaluate(ambiguous, cfg, now.Add(2*time.Second))
+	if !decision.Dispatch || !decision.First || ambiguousResult.CanonicalID == leftResult.CanonicalID || ambiguousResult.CanonicalID == rightResult.CanonicalID {
+		t.Fatalf("ambiguous nearby report should remain separate: event=%#v decision=%#v", ambiguousResult, decision)
+	}
+}
+
+func TestEarthquakeCancellationAlwaysDispatches(t *testing.T) {
+	now := time.Now()
+	base := Event{Type: "cenc_eew", EventID: "cancel-me", OriginTime: now, Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10}
+	deduper := NewDeduper(time.Hour)
+	deduper.Evaluate(base, AlertConfig{}, now)
+	cancel := Event{Type: base.Type, EventID: base.EventID, ReportNum: 2, Cancel: true}
+	result, decision := deduper.Evaluate(cancel, AlertConfig{PushUpdates: false}, now.Add(time.Second))
+	if !decision.Dispatch || !result.Cancel || !result.Revision || !containsString(decision.Reasons, "cancellation") {
+		t.Fatalf("cancellation must bypass the normal update switch: event=%#v decision=%#v", result, decision)
+	}
+}
+
+func TestEarthquakeDeduperConcurrentReportsDispatchOnce(t *testing.T) {
+	now := time.Now()
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	const reports = 32
+	var wg sync.WaitGroup
+	decisions := make(chan earthquakeDispatchDecision, reports)
+	for report := 1; report <= reports; report++ {
+		wg.Add(1)
+		go func(report int) {
+			defer wg.Done()
+			event := Event{Type: "cenc_eew", EventID: "concurrent", ReportNum: report, OriginTime: now, Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10}
+			_, decision := deduper.Evaluate(event, cfg, now)
+			decisions <- decision
+		}(report)
+	}
+	wg.Wait()
+	close(decisions)
+	dispatched := 0
+	for decision := range decisions {
+		if decision.Dispatch {
+			dispatched++
+		}
+	}
+	if dispatched != 1 {
+		t.Fatalf("concurrent duplicate reports dispatched %d times, want 1", dispatched)
+	}
+}
+
+func TestFormatAlertMarksMeaningfulRevision(t *testing.T) {
+	event := Event{
+		Type: "cenc_eew", EventID: "revision-format", ReportNum: 3,
+		OriginTime: time.Now(), Hypocenter: "四川成都", Latitude: 30.6, Longitude: 104.1,
+		Magnitude: 5.3, DepthKM: 20, Revision: true, RevisionFields: []string{"magnitude", "depth"},
+	}
+	title, _, body := formatAlert(event, Decision{}, Subscription{})
+	if !strings.Contains(title, "地震警报修订") || !strings.Contains(body, "[修订] 震级、震源深度发生显著变化") {
+		t.Fatalf("revision was not made clear in notification: title=%q body=%q", title, body)
+	}
+}
+
+func TestHandlePayloadSendsOneCrossSourceAlertAndOneMaterialRevision(t *testing.T) {
+	var pushes atomic.Int32
+	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pushes.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
+	}))
+	defer bark.Close()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(Subscription{
+		BarkID: "correlationKey", BarkServer: bark.URL,
+		Latitude: 30.6, Longitude: 104.1,
+		NotifyBands: []NotificationBand{{Min: 0, Max: notificationOpenEndedMax, Level: "active"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Bark:   BarkConfig{Server: bark.URL, SelfHostedServer: bark.URL, Group: "test", RequestTimeoutSeconds: 2},
+		Server: ServerConfig{AuditPath: filepath.Join(t.TempDir(), "audit")},
+		Alert: AlertConfig{
+			PushUpdates: true, SWaveKMS: 3.5, PWaveKMS: 6,
+			StaleOriginSecond: 600, MaxDistanceKM: 1000,
+			SendRetryAttempts: 1, SendRetryDelayMS: 1,
+		},
+	}
+	notifier := NewNotifier(cfg.Bark, cfg.Alert)
+	deduper := NewDeduper(2 * time.Hour)
+	cache := NewAlertCache(time.Hour, 10)
+	origin := time.Now().Add(30 * time.Second).Truncate(time.Second)
+	payload := func(source, eventID string, report int, magnitude float64) []byte {
+		value, err := json.Marshal(map[string]any{
+			"type": source, "EventID": eventID, "ReportNum": report,
+			"OriginTime": origin.Format(time.RFC3339), "HypoCenter": "四川成都",
+			"Latitude": 30.61, "Longitude": 104.11, "Magnitude": magnitude, "Depth": 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+
+	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload("cenc_eew", "cenc-1", 1, 5.0), time.Now())
+	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload("cq_eew", "cq-9", 1, 5.1), time.Now().Add(time.Millisecond))
+	if pushes.Load() != 1 {
+		t.Fatalf("cross-source duplicate produced %d pushes, want 1", pushes.Load())
+	}
+	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload("cq_eew", "cq-9", 2, 5.3), time.Now().Add(2*time.Millisecond))
+	if pushes.Load() != 2 {
+		t.Fatalf("material revision produced total %d pushes, want 2", pushes.Load())
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFormatBeijingTime(t *testing.T) {
 	utc := time.Date(2026, 7, 7, 2, 3, 4, 0, time.UTC)
 	if got := formatBeijing(utc, "2006-01-02 15:04:05"); got != "2026-07-07 10:03:04" {
