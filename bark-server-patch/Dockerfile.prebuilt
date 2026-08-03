@@ -4,7 +4,7 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 1000 bark \
     && adduser -S -D -H -u 1000 -G bark bark
 
-COPY bark-server /usr/local/bin/bark-server
+COPY --chmod=0755 bark-server /usr/local/bin/bark-server
 COPY LICENSE /usr/share/licenses/bark-server/LICENSE
 
 USER bark:bark
