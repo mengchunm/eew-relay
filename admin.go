@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
@@ -143,6 +144,20 @@ type adminSubscriptionAuditRequest struct {
 	Offset   int    `json:"offset,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
 }
+
+type subscriptionAuditRecordCacheEntry struct {
+	ModifiedUnixNano int64
+	Size             int64
+	Found            bool
+	Record           deliveryAuditRecord
+}
+
+var subscriptionAuditRecordCache = struct {
+	sync.Mutex
+	Items map[string]subscriptionAuditRecordCacheEntry
+}{Items: make(map[string]subscriptionAuditRecordCacheEntry)}
+
+const maxSubscriptionAuditRecordCacheEntries = 20000
 
 type legacyInvalidBarkKeyCacheEntry struct {
 	ModifiedUnixNano int64
@@ -2381,15 +2396,28 @@ func adminAuditSummaryTime(summary adminAuditSummary) time.Time {
 
 func findDeliveryAuditRecordByHash(directory, id, keyHash string) (deliveryAuditRecord, bool, error) {
 	var empty deliveryAuditRecord
-	file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
+	detailPath := filepath.Join(directory, id+".jsonl.gz")
+	info, err := os.Stat(detailPath)
 	compressed := err == nil
 	if errors.Is(err, os.ErrNotExist) {
-		file, err = os.Open(filepath.Join(directory, id+".jsonl"))
+		detailPath = filepath.Join(directory, id+".jsonl")
+		info, err = os.Stat(detailPath)
 		compressed = false
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		return empty, false, nil
 	}
+	if err != nil {
+		return empty, false, err
+	}
+	cacheKey := detailPath + "|" + keyHash
+	subscriptionAuditRecordCache.Lock()
+	cached, cachedOK := subscriptionAuditRecordCache.Items[cacheKey]
+	subscriptionAuditRecordCache.Unlock()
+	if cachedOK && cached.ModifiedUnixNano == info.ModTime().UnixNano() && cached.Size == info.Size() {
+		return cached.Record, cached.Found, nil
+	}
+	file, err := os.Open(detailPath)
 	if err != nil {
 		return empty, false, err
 	}
@@ -2405,18 +2433,38 @@ func findDeliveryAuditRecordByHash(directory, id, keyHash string) (deliveryAudit
 	}
 	scanner := bufio.NewScanner(io.LimitReader(reader, 64<<20))
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
+	hashNeedle := []byte(`"bark_hash":"` + keyHash + `"`)
 	for scanner.Scan() {
+		if !bytes.Contains(scanner.Bytes(), hashNeedle) {
+			continue
+		}
 		var record deliveryAuditRecord
 		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.BarkHash != keyHash {
 			continue
 		}
 		normalizeInvalidBarkKeyAuditRecord(&record)
+		cacheSubscriptionAuditRecord(cacheKey, info, record, true)
 		return record, true, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return empty, false, err
 	}
+	cacheSubscriptionAuditRecord(cacheKey, info, empty, false)
 	return empty, false, nil
+}
+
+func cacheSubscriptionAuditRecord(key string, info os.FileInfo, record deliveryAuditRecord, found bool) {
+	if info == nil {
+		return
+	}
+	subscriptionAuditRecordCache.Lock()
+	defer subscriptionAuditRecordCache.Unlock()
+	if len(subscriptionAuditRecordCache.Items) >= maxSubscriptionAuditRecordCacheEntries {
+		clear(subscriptionAuditRecordCache.Items)
+	}
+	subscriptionAuditRecordCache.Items[key] = subscriptionAuditRecordCacheEntry{
+		ModifiedUnixNano: info.ModTime().UnixNano(), Size: info.Size(), Found: found, Record: record,
+	}
 }
 
 func sumAdminAuditStatusCounts(counts map[string]int) int {
