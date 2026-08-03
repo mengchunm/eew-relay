@@ -347,7 +347,7 @@ type barkDeviceKeyCache struct {
 	path    string
 	size    int64
 	modTime time.Time
-	keys    map[string]struct{}
+	keys    map[string]bool
 }
 
 var deviceKeyCache barkDeviceKeyCache
@@ -1797,11 +1797,25 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 			return
 		}
 		if sub, ok := store.Get(barkID); ok {
-			source := "self_hosted"
 			if isOfficialBarkServer(sub.BarkServer) {
-				source = "existing_official_subscription"
+				writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Bark Key 已验证", Data: map[string]any{"exists": true, "source": "existing_official_subscription"}})
+				return
 			}
-			writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Bark Key 已验证", Data: map[string]any{"exists": true, "source": source}})
+			if !isSelfHostedBarkServer(sub.BarkServer, cfg) {
+				writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "该订阅的 Bark 服务器配置无效"})
+				return
+			}
+			usable, err := selfHostedBarkKeyExists(cfg, barkID)
+			if err != nil {
+				log.Printf("verify existing bark key failed key=%s: %v", maskKey(barkID), err)
+				writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Message: "暂时无法验证 Bark Key，请稍后再试"})
+				return
+			}
+			if !usable {
+				writeJSON(w, http.StatusGone, APIResponse{Success: false, Message: "该 Bark Key 没有可用的设备 Token，客户端可能已删除自建服务器；原订阅配置仍会保留"})
+				return
+			}
+			writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Bark Key 已验证", Data: map[string]any{"exists": true, "source": "self_hosted"}})
 			return
 		}
 		if isOfficialBarkServer(barkServer) {
@@ -1819,7 +1833,7 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 			return
 		}
 		if !exists {
-			writeJSON(w, http.StatusNotFound, APIResponse{Success: false, Message: "未找到这个 Bark Key，请先在 Bark App 添加自建服务器并复制该服务器生成的 Key"})
+			writeJSON(w, http.StatusNotFound, APIResponse{Success: false, Message: "未找到可用的设备 Token；请先在 Bark App 添加自建服务器并复制该服务器生成的 Key"})
 			return
 		}
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Bark Key 已验证", Data: map[string]any{"exists": true, "source": "self_hosted"}})
@@ -1891,6 +1905,10 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 			writeJSON(w, status, APIResponse{Success: false, Message: err.Error()})
 			return
 		}
+		if status, message := barkTestTargetStatus(cfg, sub); status != 0 {
+			writeJSON(w, status, APIResponse{Success: false, Message: message})
+			return
+		}
 		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 		key := strings.TrimSpace(r.URL.Query().Get("key"))
 		records, err := historyRecords(r.Context(), cfg, false)
@@ -1937,6 +1955,10 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 				status = http.StatusNotFound
 			}
 			writeJSON(w, status, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		if status, message := barkTestTargetStatus(cfg, sub); status != 0 {
+			writeJSON(w, status, APIResponse{Success: false, Message: message})
 			return
 		}
 		kind := normalizeSimulationKind(r.URL.Query().Get("kind"))
@@ -2010,7 +2032,7 @@ func newHTTPHandlerWithContext(ctx context.Context, cfg Config, store *Store, al
 				return
 			}
 			if !ok {
-				writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到这个 Bark Key，请先在 Bark App 添加自建服务器并复制该服务器生成的 Key"})
+				writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到可用的设备 Token；请先在 Bark App 添加自建服务器并复制该服务器生成的 Key"})
 				return
 			}
 		}
@@ -2721,9 +2743,9 @@ func selfHostedBarkKeyExists(cfg Config, barkID string) (bool, error) {
 	}
 	deviceKeyCache.mu.RLock()
 	if deviceKeyCache.path == path && deviceKeyCache.size == info.Size() && deviceKeyCache.modTime.Equal(info.ModTime()) && deviceKeyCache.keys != nil {
-		_, exists := deviceKeyCache.keys[barkID]
+		usable := deviceKeyCache.keys[barkID]
 		deviceKeyCache.mu.RUnlock()
-		return exists, nil
+		return usable, nil
 	}
 	deviceKeyCache.mu.RUnlock()
 
@@ -2734,8 +2756,7 @@ func selfHostedBarkKeyExists(cfg Config, barkID string) (bool, error) {
 		return false, err
 	}
 	if deviceKeyCache.path == path && deviceKeyCache.size == info.Size() && deviceKeyCache.modTime.Equal(info.ModTime()) && deviceKeyCache.keys != nil {
-		_, exists := deviceKeyCache.keys[barkID]
-		return exists, nil
+		return deviceKeyCache.keys[barkID], nil
 	}
 	db, cleanup, err := openBarkDeviceDB(path)
 	if err != nil {
@@ -2744,15 +2765,15 @@ func selfHostedBarkKeyExists(cfg Config, barkID string) (bool, error) {
 	defer cleanup()
 	defer db.Close()
 
-	keys := make(map[string]struct{})
+	keys := make(map[string]bool)
 	err = db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("device"))
 		if bucket == nil {
 			return errors.New("device bucket not found")
 		}
-		return bucket.ForEach(func(key, _ []byte) error {
+		return bucket.ForEach(func(key, token []byte) error {
 			if len(key) > 0 {
-				keys[string(key)] = struct{}{}
+				keys[string(key)] = strings.TrimSpace(string(token)) != ""
 			}
 			return nil
 		})
@@ -2764,8 +2785,22 @@ func selfHostedBarkKeyExists(cfg Config, barkID string) (bool, error) {
 	deviceKeyCache.size = info.Size()
 	deviceKeyCache.modTime = info.ModTime()
 	deviceKeyCache.keys = keys
-	_, exists := keys[barkID]
-	return exists, nil
+	return keys[barkID], nil
+}
+
+func barkTestTargetStatus(cfg Config, sub Subscription) (int, string) {
+	if !isSelfHostedBarkServer(sub.BarkServer, cfg) {
+		return 0, ""
+	}
+	usable, err := selfHostedBarkKeyExists(cfg, sub.BarkID)
+	if err != nil {
+		log.Printf("verify Bark test target failed key=%s: %v", maskKey(sub.BarkID), err)
+		return http.StatusServiceUnavailable, "暂时无法验证 Bark 设备状态，请稍后再试"
+	}
+	if !usable {
+		return http.StatusGone, "该 Bark Key 没有可用的设备 Token，客户端可能已删除自建服务器；原订阅配置仍会保留"
+	}
+	return 0, ""
 }
 
 func openBarkDeviceDB(path string) (*bolt.DB, func(), error) {
@@ -3489,6 +3524,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   if(barkID){const encodedKey=encodeURIComponent(barkID);localStorage.setItem("eew_bark_id",barkID);subscribeNav.href="/#key="+encodedKey;testNav.href="/manage#key="+encodedKey;if(queryKey||hashParams.get("key")!==barkID)history.replaceState(null,"","/manage#key="+encodedKey)}
   function authHeaders(extra){return Object.assign({Authorization:"Bearer "+barkID},extra||{})}
   function authFetch(path,options){options=options||{};options.headers=authHeaders(options.headers);return fetch(api+path,options)}
+	async function readAPIResponse(res,fallback){const text=await res.text();if(text){try{return JSON.parse(text)}catch(e){}}return {success:false,message:(fallback||"请求失败")+"（HTTP "+String(res.status||"未知")+"，服务返回了非 JSON 响应）"}}
   let historyPage=0, historyPageSize=5, historyHasNext=false;
   let simulationItems=[];
   let currentSub=null;
@@ -3527,7 +3563,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     if(!barkID){showAccess("");return}
     try{
       const res=await authFetch("/api/subscription");
-      const json=await res.json();
+	  const json=await readAPIResponse(res,"订阅加载失败");
       if(!res.ok||!json.success){showAccess(json.message||"未找到这个 Bark Key 的正式订阅。");return}
       const s=json.data;
       currentSub=s;
@@ -3545,7 +3581,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
   async function loadSimulations(){
     try{
       const res=await authFetch("/api/simulations");
-      const json=await res.json();
+	  const json=await readAPIResponse(res,"模拟等级加载失败");
       if(!res.ok||!json.success) throw new Error(json.message||"模拟等级加载失败");
       simulationItems=json.data||[];
       renderSimulations();
@@ -3623,9 +3659,9 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     const title=buttonTitle(btn);
     if(kind==="large"&&!confirm("确认发送强行响铃（铃声不可换）测试？这会向当前 Bark Key 发送最高强度提醒。")) return;
     show("正在发送"+title+"，仅发送到当前 Bark Key...","");
-    try{
-      const res=await authFetch("/api/simulate?kind="+encodeURIComponent(kind),{method:"POST"});
-      const json=await res.json();
+	  try{
+		const res=await authFetch("/api/simulate?kind="+encodeURIComponent(kind),{method:"POST"});
+		const json=await readAPIResponse(res,"发送失败");
       if(!res.ok||!json.success) throw new Error(json.message||"发送失败");
       show("已发送"+title+"。通知级别按当前这一档配置执行。","ok");
     }catch(e){show(e.message||"发送失败","err")}
@@ -3638,9 +3674,9 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
 	if(btn.dataset.notifyLevel==="critical"&&!confirm("确认使用「"+title+"」发送高烈度历史地震测试？这会向当前 Bark Key 推送复现预警。")) return;
     show(btn.dataset.notifyLevel?"正在用历史真实地震参数发送测试，仅发送到当前 Bark Key...":"正在按当前订阅规则检查该历史地震...","");
     try{
-      const qs=new URLSearchParams({source:btn.dataset.source||"",key:btn.dataset.key||""});
-      const res=await authFetch("/api/simulate-history?"+qs.toString(),{method:"POST"});
-      const json=await res.json();
+		const qs=new URLSearchParams({source:btn.dataset.source||"",key:btn.dataset.key||""});
+		const res=await authFetch("/api/simulate-history?"+qs.toString(),{method:"POST"});
+		const json=await readAPIResponse(res,"发送失败");
       if(!res.ok||!json.success) throw new Error(json.message||"发送失败");
       show("已发送历史数据测试。震源、震级、深度、烈度和发震时间均来自所选历史记录。","ok");
     }catch(e){show(e.message||"发送失败","err")}
@@ -5070,7 +5106,7 @@ func subscriptionForTestRequest(ctx context.Context, r *http.Request, cfg Config
 			return Subscription{}, false, errors.New("暂时无法验证 Bark Key，请稍后再试")
 		}
 		if !exists {
-			return Subscription{}, false, errors.New("未找到这个 Bark Key")
+			return Subscription{}, false, errors.New("未找到可用的设备 Token；客户端可能已删除自建服务器")
 		}
 	}
 	if err := validateSubscription(sub); err != nil {

@@ -683,7 +683,7 @@ func serveAdminBatchSubscriptions(w http.ResponseWriter, r *http.Request, cfg Co
 				return
 			}
 			if !existsInBark {
-				writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: fmt.Sprintf("第 %d 个订阅：自建 Bark 中未找到该 Key", index+1)})
+				writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: fmt.Sprintf("第 %d 个订阅：自建 Bark 中未找到可用的设备 Token", index+1)})
 				return
 			}
 		}
@@ -806,10 +806,10 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 			selfHostedTotal++
 		}
 	}
-	deviceKeys := map[string]struct{}{}
+	devices := map[string]bool{}
 	if selfHostedTotal > 0 {
 		var err error
-		deviceKeys, err = loadSelfHostedBarkKeys(cfg)
+		devices, err = loadSelfHostedBarkDevices(cfg)
 		if err != nil {
 			log.Printf("admin subscription liveness failed to read Bark devices: %v", err)
 			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Message: "无法读取自建 Bark 设备库，未执行测活"})
@@ -819,6 +819,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 
 	selfHostedAlive := 0
 	selfHostedMissing := 0
+	selfHostedTokenMissing := 0
 	officialNotChecked := 0
 	invalid := 0
 	results := make([]adminSubscriptionLivenessResult, 0, len(subscriptions))
@@ -827,6 +828,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 	statusCounts := map[string]int{
 		subscriptionLivenessDevicePresent:        0,
 		subscriptionLivenessDeviceMissing:        0,
+		subscriptionLivenessDeviceTokenMissing:   0,
 		subscriptionLivenessConfigurationInvalid: 0,
 		subscriptionLivenessOfficialUnverified:   0,
 	}
@@ -835,7 +837,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		results = append(results, result)
 		records[sub.BarkID] = SubscriptionLivenessRecord{Status: status, Message: message}
 		statusCounts[status]++
-		if status == subscriptionLivenessDeviceMissing || status == subscriptionLivenessConfigurationInvalid {
+		if status == subscriptionLivenessDeviceMissing || status == subscriptionLivenessDeviceTokenMissing || status == subscriptionLivenessConfigurationInvalid {
 			issues = append(issues, result)
 		}
 	}
@@ -851,9 +853,13 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 			continue
 		}
 		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
-			if _, ok := deviceKeys[sub.BarkID]; ok {
+			usable, exists := devices[sub.BarkID]
+			if exists && usable {
 				selfHostedAlive++
-				appendResult(sub, subscriptionLivenessDevicePresent, "自建 Bark 设备库中存在该 Key")
+				appendResult(sub, subscriptionLivenessDevicePresent, "自建 Bark 设备库中存在该 Key，且设备 Token 有效")
+			} else if exists {
+				selfHostedTokenMissing++
+				appendResult(sub, subscriptionLivenessDeviceTokenMissing, "自建 Bark 仍保留该 Key，但设备 Token 为空；客户端可能已删除该服务器")
 			} else {
 				selfHostedMissing++
 				appendResult(sub, subscriptionLivenessDeviceMissing, "自建 Bark 设备库中不存在该 Key")
@@ -872,9 +878,9 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "测活完成，但保存订阅标签失败，结果未生效"})
 		return
 	}
-	healthy := selfHostedMissing == 0 && invalid == 0
-	log.Printf("admin subscription liveness scope=%s total=%d not_found=%d self_hosted=%d alive=%d missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
-		scope, len(subscriptions), notFound, selfHostedTotal, selfHostedAlive, selfHostedMissing, officialNotChecked, invalid, time.Since(startedAt), clientIP(r))
+	healthy := selfHostedMissing == 0 && selfHostedTokenMissing == 0 && invalid == 0
+	log.Printf("admin subscription liveness scope=%s total=%d not_found=%d self_hosted=%d alive=%d missing=%d token_missing=%d official_unchecked=%d invalid=%d duration=%s ip=%s",
+		scope, len(subscriptions), notFound, selfHostedTotal, selfHostedAlive, selfHostedMissing, selfHostedTokenMissing, officialNotChecked, invalid, time.Since(startedAt), clientIP(r))
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "无推送测活完成", Data: map[string]any{
 		"healthy":                    healthy,
 		"scope":                      scope,
@@ -884,9 +890,10 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		"self_hosted_total":          selfHostedTotal,
 		"self_hosted_alive":          selfHostedAlive,
 		"self_hosted_missing":        selfHostedMissing,
+		"self_hosted_token_missing":  selfHostedTokenMissing,
 		"official_not_checked":       officialNotChecked,
 		"invalid_subscriptions":      invalid,
-		"device_keys":                len(deviceKeys),
+		"device_keys":                len(devices),
 		"status_counts":              statusCounts,
 		"result_total":               len(results),
 		"results":                    results,
@@ -926,9 +933,9 @@ func adminLivenessSubscriptions(cfg Config, subscriptions []Subscription, reques
 	return selected, "selected", notFound
 }
 
-func loadSelfHostedBarkKeys(cfg Config) (map[string]struct{}, error) {
+func loadSelfHostedBarkDevices(cfg Config) (map[string]bool, error) {
 	if dsn := strings.TrimSpace(cfg.Bark.DeviceDBDSN); dsn != "" {
-		return selfHostedBarkKeysMySQL(dsn)
+		return selfHostedBarkDevicesMySQL(dsn)
 	}
 	path := strings.TrimSpace(cfg.Bark.DeviceDBPath)
 	if path == "" {
@@ -940,15 +947,15 @@ func loadSelfHostedBarkKeys(cfg Config) (map[string]struct{}, error) {
 	}
 	defer cleanup()
 	defer db.Close()
-	keys := make(map[string]struct{})
+	devices := make(map[string]bool)
 	err = db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("device"))
 		if bucket == nil {
 			return errors.New("device bucket not found")
 		}
-		return bucket.ForEach(func(key, _ []byte) error {
+		return bucket.ForEach(func(key, token []byte) error {
 			if len(key) > 0 {
-				keys[string(key)] = struct{}{}
+				devices[string(key)] = strings.TrimSpace(string(token)) != ""
 			}
 			return nil
 		})
@@ -956,7 +963,7 @@ func loadSelfHostedBarkKeys(cfg Config) (map[string]struct{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return keys, nil
+	return devices, nil
 }
 
 func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier *Notifier, health *RuntimeHealth) map[string]any {
@@ -2166,6 +2173,10 @@ func serveAdminTest(w http.ResponseWriter, r *http.Request, cfg Config, store *S
 	sub, ok := store.Get(barkID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, APIResponse{Success: false, Message: "未找到该订阅"})
+		return
+	}
+	if status, message := barkTestTargetStatus(cfg, sub); status != 0 {
+		writeJSON(w, status, APIResponse{Success: false, Message: message})
 		return
 	}
 	kind := strings.ToLower(strings.TrimSpace(request.Kind))

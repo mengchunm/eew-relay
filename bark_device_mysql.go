@@ -20,11 +20,11 @@ func selfHostedBarkKeyExistsMySQL(dsn, barkID string) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE `+"`key`"+`=? LIMIT 1)`, barkID).Scan(&exists); err != nil {
+	var usable bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE `+"`key`"+`=? AND LENGTH(TRIM(token)) > 0 LIMIT 1)`, barkID).Scan(&usable); err != nil {
 		return false, err
 	}
-	return exists, nil
+	return usable, nil
 }
 
 func barkMySQLPool(dsn string) (*sql.DB, error) {
@@ -53,28 +53,28 @@ func barkMySQLPool(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-func selfHostedBarkKeysMySQL(dsn string) (map[string]struct{}, error) {
+func selfHostedBarkDevicesMySQL(dsn string) (map[string]bool, error) {
 	db, err := barkMySQLPool(dsn)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	rows, err := db.QueryContext(ctx, `SELECT `+"`key`"+` FROM devices`)
+	rows, err := db.QueryContext(ctx, `SELECT `+"`key`"+`, token FROM devices`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	keys := make(map[string]struct{})
+	devices := make(map[string]bool)
 	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
+		var key, token string
+		if err := rows.Scan(&key, &token); err != nil {
 			return nil, err
 		}
 		key = strings.TrimSpace(key)
 		if key != "" {
-			keys[key] = struct{}{}
+			devices[key] = strings.TrimSpace(token) != ""
 		}
 	}
-	return keys, rows.Err()
+	return devices, rows.Err()
 }

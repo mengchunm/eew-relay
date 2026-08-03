@@ -1151,6 +1151,21 @@
       return fetch(api + path, { ...options, headers: barkAuthHeaders(key, options.headers) });
     }
 
+    async function readAPIResponse(res, fallbackMessage = "请求失败") {
+      const text = await res.text();
+      if (text) {
+        try {
+          return JSON.parse(text);
+        } catch (_) {
+          // Cloudflare and other reverse proxies may replace an upstream error with HTML or plain text.
+        }
+      }
+      return {
+        success: false,
+        message: `${fallbackMessage}（HTTP ${res.status || "未知"}，服务返回了非 JSON 响应）`
+      };
+    }
+
     function barkKeyFromLocation() {
       const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
       const queryParams = new URLSearchParams(location.search);
@@ -1283,19 +1298,22 @@
     async function verifyBarkKey(visible = true) {
       const key = await normalizeBarkInput(false);
       const seq = ++keyVerifySeq;
-      if (!key) return;
+      if (!key) return false;
       if (visible) showKeyNotice("正在验证 Bark Key...");
       try {
         const res = await barkFetch("/api/bark-key?server=" + encodeURIComponent(selectedBarkServer), key);
-        const json = await res.json();
-        if (seq !== keyVerifySeq) return;
+        const json = await readAPIResponse(res, "Bark Key 验证失败");
+        if (seq !== keyVerifySeq) return false;
         if (!res.ok || !json.success) throw new Error(json.message || "Bark Key 验证失败");
         showKeyNotice(json.message || "Bark Key 已验证。", "success");
         rememberBarkKey(key);
         await syncSubscriptionFromServer(key, visible);
+        return true;
       } catch (err) {
-        if (seq !== keyVerifySeq) return;
+        if (seq !== keyVerifySeq) return false;
         showKeyNotice(err.message || "Bark Key 验证失败。");
+        if (!visible) show(err.message || "Bark Key 验证失败。", "error");
+        return false;
       }
     }
 
@@ -1543,6 +1561,7 @@
         btn.onclick = async () => {
           const kind = btn.dataset.kind || "small";
           const label = btn.dataset.label || "测试";
+          if (!await verifyBarkKey(false)) return;
           const key = await normalizeBarkInput(true);
           if (!key) return show("请先填写 Bark Key。", "error");
           if (kind === "large" && !confirm("确认发送强行响铃（铃声不可换）测试？这会向当前 Bark Key 发送最高强度提醒。")) return;
@@ -1555,7 +1574,7 @@
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload)
             });
-            const json = await res.json();
+            const json = await readAPIResponse(res, "发送失败");
             if (!res.ok || !json.success) throw new Error(json.message || "发送失败");
             show("已发送 " + label + "。本次使用当前页面配置，不会保存。", "success");
           } catch (err) {

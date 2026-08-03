@@ -17,6 +17,7 @@ const (
 	subscriptionLivenessUntested             = "untested"
 	subscriptionLivenessDevicePresent        = "device_present"
 	subscriptionLivenessDeviceMissing        = "device_missing"
+	subscriptionLivenessDeviceTokenMissing   = "device_token_missing"
 	subscriptionLivenessConfigurationInvalid = "configuration_invalid"
 	subscriptionLivenessOfficialUnverified   = "official_unverified"
 	subscriptionLivenessFileVersion          = 1
@@ -86,7 +87,7 @@ func newSubscriptionLivenessStore(cfg Config) (*subscriptionLivenessStore, error
 
 func validSubscriptionLivenessStatus(status string) bool {
 	switch strings.TrimSpace(status) {
-	case subscriptionLivenessDevicePresent, subscriptionLivenessDeviceMissing, subscriptionLivenessConfigurationInvalid, subscriptionLivenessOfficialUnverified:
+	case subscriptionLivenessDevicePresent, subscriptionLivenessDeviceMissing, subscriptionLivenessDeviceTokenMissing, subscriptionLivenessConfigurationInvalid, subscriptionLivenessOfficialUnverified:
 		return true
 	default:
 		return false
@@ -96,9 +97,11 @@ func validSubscriptionLivenessStatus(status string) bool {
 func subscriptionLivenessStatusLabel(status string) string {
 	switch status {
 	case subscriptionLivenessDevicePresent:
-		return "设备库存在"
+		return "设备可用"
 	case subscriptionLivenessDeviceMissing:
 		return "设备库缺失"
+	case subscriptionLivenessDeviceTokenMissing:
+		return "设备 Token 缺失"
 	case subscriptionLivenessConfigurationInvalid:
 		return "配置异常"
 	case subscriptionLivenessOfficialUnverified:

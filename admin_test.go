@@ -541,7 +541,10 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return bucket.Put([]byte("alive-key"), []byte("token"))
+		if err := bucket.Put([]byte("alive-key"), []byte("token")); err != nil {
+			return err
+		}
+		return bucket.Put([]byte("tokenless-key"), []byte{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +552,7 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler, store, _ := adminTestHandler(t, cfg)
-	for _, key := range []string{"alive-key", "missing-key"} {
+	for _, key := range []string{"alive-key", "tokenless-key", "missing-key"} {
 		if err := store.Upsert(Subscription{BarkID: key, BarkServer: barkServer.URL, LocationName: "成都", Latitude: 30, Longitude: 104, NotifyRules: defaultNotificationRules()}); err != nil {
 			t.Fatal(err)
 		}
@@ -569,7 +572,7 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		t.Fatalf("liveness unexpectedly sent %d HTTP push requests", pushRequests.Load())
 	}
 	body := recorder.Body.String()
-	for _, expected := range []string{`"total_subscriptions":4`, `"self_hosted_alive":1`, `"self_hosted_missing":1`, `"official_not_checked":1`, `"invalid_subscriptions":1`, `"result_total":4`, `"labels_saved":true`, `"notification_sent":false`, `"bark_id":"alive-key"`, `"bark_id":"missing-key"`, `"bark_id":"official-key"`, `"bark_id":"invalid-key"`, `"status":"device_present"`, `"status":"device_missing"`, `"status":"official_unverified"`, `"status":"configuration_invalid"`} {
+	for _, expected := range []string{`"total_subscriptions":5`, `"self_hosted_alive":1`, `"self_hosted_token_missing":1`, `"self_hosted_missing":1`, `"official_not_checked":1`, `"invalid_subscriptions":1`, `"result_total":5`, `"labels_saved":true`, `"notification_sent":false`, `"bark_id":"alive-key"`, `"bark_id":"tokenless-key"`, `"bark_id":"missing-key"`, `"bark_id":"official-key"`, `"bark_id":"invalid-key"`, `"status":"device_present"`, `"status":"device_token_missing"`, `"status":"device_missing"`, `"status":"official_unverified"`, `"status":"configuration_invalid"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("liveness response missing %s: %s", expected, body)
 		}
@@ -579,10 +582,11 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, status := range map[string]string{
-		"alive-key":    subscriptionLivenessDevicePresent,
-		"missing-key":  subscriptionLivenessDeviceMissing,
-		"official-key": subscriptionLivenessOfficialUnverified,
-		"invalid-key":  subscriptionLivenessConfigurationInvalid,
+		"alive-key":     subscriptionLivenessDevicePresent,
+		"tokenless-key": subscriptionLivenessDeviceTokenMissing,
+		"missing-key":   subscriptionLivenessDeviceMissing,
+		"official-key":  subscriptionLivenessOfficialUnverified,
+		"invalid-key":   subscriptionLivenessConfigurationInvalid,
 	} {
 		sub, ok := store.Get(key)
 		if !ok || reopened.Snapshot(sub).Status != status {
@@ -591,6 +595,7 @@ func TestAdminSubscriptionLivenessDoesNotSendNotifications(t *testing.T) {
 	}
 	for status, expectedKey := range map[string]string{
 		subscriptionLivenessDevicePresent:        "alive-key",
+		subscriptionLivenessDeviceTokenMissing:   "tokenless-key",
 		subscriptionLivenessDeviceMissing:        "missing-key",
 		subscriptionLivenessOfficialUnverified:   "official-key",
 		subscriptionLivenessConfigurationInvalid: "invalid-key",

@@ -1374,6 +1374,8 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 		`定位失败或未获得定位权限。请使用上方搜索框搜索地址并添加定位。`,
 		`window.isSecureContext`,
 		`function temporaryTestPayload(key)`,
+		`async function readAPIResponse`,
+		`if (!await verifyBarkKey(false)) return;`,
 		`body: JSON.stringify(payload)`,
 		`bark_id: key`,
 		`barkInput.value = urlBarkID || ""`,
@@ -1422,6 +1424,55 @@ func TestIndexAutoFillsBarkKeyFromFragmentAndUsesFixedAPIPaths(t *testing.T) {
 	}
 	if !strings.Contains(body, `tooltip.textContent = item.name`) || !strings.Contains(body, `savedMarker.bindTooltip(tooltip)`) {
 		t.Fatal("map tooltip must use a text node instead of HTML content")
+	}
+}
+
+func TestHTTPBarkKeyRejectsExistingSelfHostedSubscriptionWithoutDeviceToken(t *testing.T) {
+	bark := httptest.NewServer(http.NotFoundHandler())
+	defer bark.Close()
+	deviceDBPath := filepath.Join(t.TempDir(), "bark.db")
+	deviceDB, err := bolt.Open(deviceDBPath, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceDB.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("device"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("deletedClientKey"), []byte{})
+	}); err != nil {
+		_ = deviceDB.Close()
+		t.Fatal(err)
+	}
+	if err := deviceDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(Subscription{BarkID: "deletedClientKey", BarkServer: bark.URL, LocationName: "成都", Latitude: 30, Longitude: 104, NotifyRules: defaultNotificationRules()}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Bark: BarkConfig{Server: bark.URL, SelfHostedServer: bark.URL, DeviceDBPath: deviceDBPath}, Alert: AlertConfig{SWaveKMS: 3.5, PWaveKMS: 6}}
+	handler := newHTTPHandler(cfg, store, NewAlertCache(time.Hour, 10), NewNotifier(cfg.Bark, cfg.Alert), &RuntimeHealth{})
+	req := httptest.NewRequest(http.MethodGet, "/api/bark-key?server="+url.QueryEscape(bark.URL), nil)
+	req.Header.Set("Authorization", "Bearer deletedClientKey")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusGone || !strings.Contains(recorder.Body.String(), "没有可用的设备 Token") {
+		t.Fatalf("tokenless Bark key status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	simulateReq := httptest.NewRequest(http.MethodPost, "/api/simulate?kind=small", nil)
+	simulateReq.Header.Set("Authorization", "Bearer deletedClientKey")
+	simulateRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(simulateRecorder, simulateReq)
+	if simulateRecorder.Code != http.StatusGone || !strings.Contains(simulateRecorder.Body.String(), "没有可用的设备 Token") {
+		t.Fatalf("tokenless Bark simulation status=%d body=%s", simulateRecorder.Code, simulateRecorder.Body.String())
+	}
+	if _, ok := store.Get("deletedClientKey"); !ok {
+		t.Fatal("tokenless Bark key caused the saved subscription to be deleted")
 	}
 }
 
@@ -1475,6 +1526,8 @@ func TestManageHistoryAllowsRuleResponseForUnmatchedEvents(t *testing.T) {
 		`id="access-panel" hidden`,
 		`测试页需要已有正式订阅`,
 		`location.href="/manage#key="+encodeURIComponent(key)`,
+		`async function readAPIResponse`,
+		`readAPIResponse(res,"发送失败")`,
 		`protectedContent.forEach(function(node){node.hidden=false})`,
 		`<link rel="icon" href="/eew-favicon.svg" type="image/svg+xml">`,
 	} {
