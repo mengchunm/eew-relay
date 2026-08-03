@@ -129,6 +129,14 @@ type adminAuditFilter struct {
 	DateTo   string
 }
 
+type legacyInvalidBarkKeyCacheEntry struct {
+	ModifiedUnixNano int64
+	Size             int64
+	Count            int
+}
+
+var legacyInvalidBarkKeyAuditCache sync.Map
+
 type auditHistoryCandidate struct {
 	Record     HistoryRecord
 	OriginTime time.Time
@@ -1550,14 +1558,26 @@ func normalizeLegacyInvalidBarkKeySummary(directory, id string, summary *deliver
 	}
 	invalidCount := 0
 	if summary.Failed > 0 {
-		file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
+		detailPath := filepath.Join(directory, id+".jsonl.gz")
+		file, err := os.Open(detailPath)
 		compressed := err == nil
 		if errors.Is(err, os.ErrNotExist) {
-			file, err = os.Open(filepath.Join(directory, id+".jsonl"))
+			detailPath = filepath.Join(directory, id+".jsonl")
+			file, err = os.Open(detailPath)
 			compressed = false
 		}
 		if err == nil {
 			defer file.Close()
+			info, statErr := file.Stat()
+			if statErr == nil {
+				if cached, ok := legacyInvalidBarkKeyAuditCache.Load(detailPath); ok {
+					entry := cached.(legacyInvalidBarkKeyCacheEntry)
+					if entry.ModifiedUnixNano == info.ModTime().UnixNano() && entry.Size == info.Size() {
+						applyInvalidBarkKeySummaryCount(summary, entry.Count)
+						return
+					}
+				}
+			}
 			var reader io.Reader = file
 			var gz *gzip.Reader
 			if compressed {
@@ -1577,8 +1597,15 @@ func normalizeLegacyInvalidBarkKeySummary(directory, id string, summary *deliver
 					}
 				}
 			}
+			if statErr == nil && err == nil {
+				legacyInvalidBarkKeyAuditCache.Store(detailPath, legacyInvalidBarkKeyCacheEntry{ModifiedUnixNano: info.ModTime().UnixNano(), Size: info.Size(), Count: invalidCount})
+			}
 		}
 	}
+	applyInvalidBarkKeySummaryCount(summary, invalidCount)
+}
+
+func applyInvalidBarkKeySummaryCount(summary *deliveryAuditSummary, invalidCount int) {
 	summary.InvalidBarkKeys = invalidCount
 	summary.Failed = max(0, summary.Failed-invalidCount)
 	summary.StatusCounts["failed"] = summary.Failed
