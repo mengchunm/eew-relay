@@ -47,6 +47,9 @@ func TestQueuedTargetRetriesTransientFailuresUntilSuccess(t *testing.T) {
 	if result.Retries != 3 {
 		t.Fatalf("expected three retries, got %d", result.Retries)
 	}
+	if result.FirstAttemptDoneAtUnixMS <= 0 {
+		t.Fatalf("first attempt completion was not recorded: %#v", result)
+	}
 }
 
 func TestQueuedTargetDoesNotRetryPermanentFailure(t *testing.T) {
@@ -78,6 +81,9 @@ func TestQueuedTargetDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("permanent failure must not retry, got %d requests", got)
+	}
+	if result.FirstAttemptDoneAtUnixMS <= 0 {
+		t.Fatalf("first attempt completion was not recorded: %#v", result)
 	}
 }
 

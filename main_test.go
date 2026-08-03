@@ -141,7 +141,7 @@ func TestWriteDeliveryAudit(t *testing.T) {
 	sub := Subscription{BarkID: "secretKey", BarkServer: "https://bark.example.test", Latitude: 30.5, Longitude: 104.1}
 	decision := Decision{EstimatedIntensity: 2, EstimatedIntensityRank: 2, DistanceKM: 120.4, HypocentralKM: 121, SecondsToS: 20}
 	started := time.Now()
-	record := deliveryAuditRecordForTarget(cfg, event, sub, decision, started, started, "pushed", "", "active", 150*time.Millisecond, 0, nil)
+	record := deliveryAuditRecordForTarget(cfg, event, sub, decision, started, started, "pushed", "", "active", 150*time.Millisecond, started.Add(80*time.Millisecond), 0, nil)
 	if strings.Contains(record.BarkMasked, "secretKey") || record.BarkHash == "" {
 		t.Fatalf("audit record should mask and hash bark key: %#v", record)
 	}
@@ -175,6 +175,17 @@ func TestWriteDeliveryAudit(t *testing.T) {
 	summaryPath := filepath.Join(dir, "test_event-r1-cenc_eew.summary.json")
 	if _, err := os.Stat(summaryPath); err != nil {
 		t.Fatalf("expected summary audit file: %v", err)
+	}
+	summaryData, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary deliveryAuditSummary
+	if err := json.Unmarshal(summaryData, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.FirstPassDurationMS != 80 {
+		t.Fatalf("first pass duration=%d want 80", summary.FirstPassDurationMS)
 	}
 	if runtime.GOOS != "windows" {
 		for _, path := range []string{detailPath, summaryPath} {

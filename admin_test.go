@@ -313,7 +313,7 @@ func TestAdminAuditAPIReadsSummaryAndMaskedDetails(t *testing.T) {
 	now := time.Now()
 	event := Event{EventID: "audit-test", ReportNum: 2, Type: "sc_eew", OriginTime: now, Magnitude: 5.1}
 	sub := Subscription{BarkID: "sensitive-bark-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104}
-	record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, 0, nil)
+	record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
 	if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestAdminAuditGroupsReportsForSameEarthquake(t *testing.T) {
 	sub := Subscription{BarkID: "grouped-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104}
 	for _, reportNum := range []int{1, 3} {
 		event := Event{EventID: "grouped-event", ReportNum: reportNum, Type: "sc_eew", OriginTime: now, Hypocenter: "四川成都市", Latitude: 30.6, Longitude: 104.1, Magnitude: 5.2, DepthKM: 12, MaxIntensity: "6"}
-		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, 0, nil)
+		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
 		if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 			t.Fatal(err)
 		}
@@ -425,7 +425,7 @@ func TestAdminAuditGroupsSameEarthquakeAcrossSourcesWithoutMergingSameSourceAfte
 		{EventID: "cenc-aftershock", ReportNum: 1, Type: "cenc_eew", OriginTime: now.Add(2 * time.Second), Hypocenter: "华北地区", Latitude: 40, Longitude: 120, Magnitude: 4.8},
 	}
 	for _, event := range events {
-		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, 0, nil)
+		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
 		if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 			t.Fatal(err)
 		}

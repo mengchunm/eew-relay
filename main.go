@@ -4104,14 +4104,15 @@ type queuedFanoutPlan struct {
 }
 
 type fanoutResult struct {
-	Target  fanoutTarget
-	Pushed  bool
-	Skipped bool
-	Err     error
-	Reason  string
-	Elapsed time.Duration
-	Retries int
-	Until   time.Time
+	Target             fanoutTarget
+	Pushed             bool
+	Skipped            bool
+	Err                error
+	Reason             string
+	Elapsed            time.Duration
+	FirstAttemptDoneAt time.Time
+	Retries            int
+	Until              time.Time
 }
 
 type deliveryAuditRecord struct {
@@ -4133,6 +4134,7 @@ type deliveryAuditRecord struct {
 	HypocentralKM      float64  `json:"hypocentral_km"`
 	SecondsToS         int      `json:"seconds_to_s"`
 	ElapsedMS          int64    `json:"elapsed_ms,omitempty"`
+	FirstAttemptDoneAt string   `json:"first_attempt_done_at,omitempty"`
 	RetryCount         int      `json:"retry_count,omitempty"`
 	Error              string   `json:"error,omitempty"`
 	LocationName       string   `json:"location_name,omitempty"`
@@ -4157,6 +4159,7 @@ type deliveryAuditSummary struct {
 	FanoutStartedAt       string         `json:"fanout_started_at"`
 	FanoutDoneAt          string         `json:"fanout_done_at"`
 	DurationMS            int64          `json:"duration_ms"`
+	FirstPassDurationMS   int64          `json:"first_pass_duration_ms,omitempty"`
 	TotalSubscriptions    int            `json:"total_subscriptions"`
 	Queued                int            `json:"queued"`
 	Pushed                int            `json:"pushed"`
@@ -4199,7 +4202,7 @@ func dispatchEvent(ctx context.Context, cfg Config, notifier *Notifier, store *S
 		if level == "" {
 			skipped++
 			if auditEnabled {
-				auditRecords = append(auditRecords, deliveryAuditRecordForTarget(cfg, event, selectedSub, decision, receivedAt, startedAt, "filtered", "notify_band", "", 0, 0, nil))
+				auditRecords = append(auditRecords, deliveryAuditRecordForTarget(cfg, event, selectedSub, decision, receivedAt, startedAt, "filtered", "notify_band", "", 0, time.Time{}, 0, nil))
 			}
 			continue
 		}
@@ -4254,7 +4257,7 @@ func dispatchEvent(ctx context.Context, cfg Config, notifier *Notifier, store *S
 				status = "skipped"
 				reason = result.Reason
 			}
-			auditRecords = append(auditRecords, deliveryAuditRecordForTarget(cfg, event, result.Target.Sub, result.Target.Decision, receivedAt, startedAt, status, reason, result.Target.Level, result.Elapsed, result.Retries, result.Err))
+			auditRecords = append(auditRecords, deliveryAuditRecordForTarget(cfg, event, result.Target.Sub, result.Target.Decision, receivedAt, startedAt, status, reason, result.Target.Level, result.Elapsed, result.FirstAttemptDoneAt, result.Retries, result.Err))
 		}
 		if err := writeDeliveryAudit(cfg, event, receivedAt, startedAt, time.Now(), len(subs), officialCount, selfHostedCount, officialFanoutConcurrency(cfg, officialCount), selfHostedFanoutConcurrency(cfg, selfHostedCount), auditRecords); err != nil {
 			log.Printf("write delivery audit failed id=%s report=%d type=%s: %v", event.EventID, event.ReportNum, event.Type, err)
@@ -4358,7 +4361,7 @@ func shouldAuditEvent(event Event) bool {
 	return !isTestEvent(event) && !isHistoryTestEvent(event)
 }
 
-func deliveryAuditRecordForTarget(cfg Config, event Event, sub Subscription, decision Decision, receivedAt, startedAt time.Time, status, reason, level string, elapsed time.Duration, retries int, err error) deliveryAuditRecord {
+func deliveryAuditRecordForTarget(cfg Config, event Event, sub Subscription, decision Decision, receivedAt, startedAt time.Time, status, reason, level string, elapsed time.Duration, firstAttemptDoneAt time.Time, retries int, err error) deliveryAuditRecord {
 	server := normalizeBarkServer(sub.BarkServer, cfg)
 	record := deliveryAuditRecord{
 		EventID:            event.EventID,
@@ -4384,6 +4387,9 @@ func deliveryAuditRecordForTarget(cfg Config, event Event, sub Subscription, dec
 	}
 	if elapsed > 0 {
 		record.ElapsedMS = elapsed.Milliseconds()
+	}
+	if !firstAttemptDoneAt.IsZero() {
+		record.FirstAttemptDoneAt = formatBeijing(firstAttemptDoneAt, time.RFC3339Nano)
 	}
 	if retries > 0 {
 		record.RetryCount = retries
@@ -4524,6 +4530,7 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 	levelCounts := map[string]int{}
 	intensityCounts := map[string]int{}
 	var elapsed []int64
+	var firstAttemptDoneAt time.Time
 	var retryCount int
 	for _, record := range records {
 		statusCounts[record.Status]++
@@ -4539,6 +4546,11 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 		intensityCounts[fmt.Sprintf("%.1f", record.EstimatedIntensity)]++
 		if record.ElapsedMS > 0 {
 			elapsed = append(elapsed, record.ElapsedMS)
+		}
+		if record.FirstAttemptDoneAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, record.FirstAttemptDoneAt); err == nil && parsed.After(firstAttemptDoneAt) {
+				firstAttemptDoneAt = parsed
+			}
 		}
 		retryCount += record.RetryCount
 	}
@@ -4582,6 +4594,9 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 		summary.ElapsedP50MS = percentileInt64(elapsed, 50)
 		summary.ElapsedP90MS = percentileInt64(elapsed, 90)
 		summary.ElapsedP99MS = percentileInt64(elapsed, 99)
+	}
+	if firstAttemptDoneAt.After(startedAt) {
+		summary.FirstPassDurationMS = firstAttemptDoneAt.Sub(startedAt).Milliseconds()
 	}
 	return summary
 }
@@ -4677,15 +4692,15 @@ func sendFanoutTarget(ctx context.Context, notifier *Notifier, event Event, targ
 		}
 	}
 	start := time.Now()
-	retries, err := notifier.SendWithRetry(ctx, server, target.Sub.BarkID, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
+	retries, firstAttemptDoneAt, err := notifier.SendWithRetryTiming(ctx, server, target.Sub.BarkID, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
 	elapsed := time.Since(start)
 	if useOfficialGuard {
 		notifier.errorGuard.Record(guardKey, err, time.Now())
 	}
 	if err != nil {
-		return fanoutResult{Target: target, Err: err, Elapsed: elapsed, Retries: retries}
+		return fanoutResult{Target: target, Err: err, Elapsed: elapsed, FirstAttemptDoneAt: firstAttemptDoneAt, Retries: retries}
 	}
-	return fanoutResult{Target: target, Pushed: true, Elapsed: elapsed, Retries: retries}
+	return fanoutResult{Target: target, Pushed: true, Elapsed: elapsed, FirstAttemptDoneAt: firstAttemptDoneAt, Retries: retries}
 }
 
 func splitFanoutTargets(cfg Config, targets []fanoutTarget) ([]fanoutTarget, []fanoutTarget) {
@@ -6333,14 +6348,23 @@ func (n *Notifier) sendServer(server string) string {
 }
 
 func (n *Notifier) SendWithRetry(ctx context.Context, server, key, title, subtitle, body string, extra map[string]string, options PushOptions) (int, error) {
+	retries, _, err := n.SendWithRetryTiming(ctx, server, key, title, subtitle, body, extra, options)
+	return retries, err
+}
+
+func (n *Notifier) SendWithRetryTiming(ctx context.Context, server, key, title, subtitle, body string, extra map[string]string, options PushOptions) (int, time.Time, error) {
 	retriesUsed := 0
+	var firstAttemptDoneAt time.Time
 	for {
 		err := n.Send(ctx, server, key, title, subtitle, body, extra, options)
+		if firstAttemptDoneAt.IsZero() {
+			firstAttemptDoneAt = time.Now()
+		}
 		if err == nil {
-			return retriesUsed, nil
+			return retriesUsed, firstAttemptDoneAt, nil
 		}
 		if retriesUsed >= n.retryAttempts || !retryableBarkError(err) {
-			return retriesUsed, err
+			return retriesUsed, firstAttemptDoneAt, err
 		}
 		retriesUsed++
 		delay := n.retryDelay
@@ -6350,7 +6374,7 @@ func (n *Notifier) SendWithRetry(ctx context.Context, server, key, title, subtit
 		delay *= time.Duration(retriesUsed)
 		select {
 		case <-ctx.Done():
-			return retriesUsed, ctx.Err()
+			return retriesUsed, firstAttemptDoneAt, ctx.Err()
 		case <-time.After(delay):
 		}
 	}

@@ -41,11 +41,12 @@ type relayFanoutRequest struct {
 }
 
 type relayItemResult struct {
-	Index     int    `json:"index"`
-	Pushed    bool   `json:"pushed"`
-	Error     string `json:"error,omitempty"`
-	Retries   int    `json:"retries"`
-	ElapsedMS int64  `json:"elapsed_ms"`
+	Index                    int    `json:"index"`
+	Pushed                   bool   `json:"pushed"`
+	Error                    string `json:"error,omitempty"`
+	Retries                  int    `json:"retries"`
+	ElapsedMS                int64  `json:"elapsed_ms"`
+	FirstAttemptDoneAtUnixMS int64  `json:"first_attempt_done_at_unix_ms,omitempty"`
 }
 
 type relayFanoutResponse struct {
@@ -178,8 +179,11 @@ func (r *fanoutRelayRuntime) handleFanout(w http.ResponseWriter, req *http.Reque
 			}
 			target := payload.Targets[index]
 			started := time.Now()
-			retries, err := r.notifier.SendWithRetry(req.Context(), target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
+			retries, firstAttemptDoneAt, err := r.notifier.SendWithRetryTiming(req.Context(), target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
 			result := relayItemResult{Index: index, Pushed: err == nil, Retries: retries, ElapsedMS: time.Since(started).Milliseconds()}
+			if !firstAttemptDoneAt.IsZero() {
+				result.FirstAttemptDoneAtUnixMS = firstAttemptDoneAt.UnixMilli()
+			}
 			if err != nil {
 				result.Error = err.Error()
 			}
@@ -371,6 +375,9 @@ func (c *FanoutRelayClient) sendBatch(ctx context.Context, event Event, batchInd
 		}
 		seen[item.Index] = true
 		result := fanoutResult{Target: targets[item.Index], Pushed: item.Pushed, Retries: item.Retries, Elapsed: time.Duration(item.ElapsedMS) * time.Millisecond}
+		if item.FirstAttemptDoneAtUnixMS > 0 {
+			result.FirstAttemptDoneAt = time.UnixMilli(item.FirstAttemptDoneAtUnixMS)
+		}
 		if item.Error != "" {
 			result.Err = errors.New(item.Error)
 		}
