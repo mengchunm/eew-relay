@@ -93,31 +93,32 @@ type adminAuditSummary struct {
 }
 
 type adminAuditEventGroup struct {
-	ID            string              `json:"id"`
-	Title         string              `json:"title"`
-	EventID       string              `json:"event_id"`
-	EventIDs      []string            `json:"event_ids"`
-	Type          string              `json:"type"`
-	Source        string              `json:"source"`
-	Sources       []string            `json:"sources"`
-	OriginTime    string              `json:"origin_time"`
-	Hypocenter    string              `json:"hypocenter,omitempty"`
-	Latitude      float64             `json:"latitude,omitempty"`
-	Longitude     float64             `json:"longitude,omitempty"`
-	Magnitude     float64             `json:"magnitude,omitempty"`
-	DepthKM       float64             `json:"depth_km,omitempty"`
-	MaxIntensity  string              `json:"max_intensity,omitempty"`
-	Final         bool                `json:"final,omitempty"`
-	Cancel        bool                `json:"cancel,omitempty"`
-	FirstReceived string              `json:"first_received_at"`
-	LastReceived  string              `json:"last_received_at"`
-	ReportCount   int                 `json:"report_count"`
-	TotalPushed   int                 `json:"total_pushed"`
-	TotalFiltered int                 `json:"total_filtered"`
-	TotalSkipped  int                 `json:"total_skipped"`
-	TotalFailed   int                 `json:"total_failed"`
-	Latest        adminAuditSummary   `json:"latest"`
-	Reports       []adminAuditSummary `json:"reports"`
+	ID                   string              `json:"id"`
+	Title                string              `json:"title"`
+	EventID              string              `json:"event_id"`
+	EventIDs             []string            `json:"event_ids"`
+	Type                 string              `json:"type"`
+	Source               string              `json:"source"`
+	Sources              []string            `json:"sources"`
+	OriginTime           string              `json:"origin_time"`
+	Hypocenter           string              `json:"hypocenter,omitempty"`
+	Latitude             float64             `json:"latitude,omitempty"`
+	Longitude            float64             `json:"longitude,omitempty"`
+	Magnitude            float64             `json:"magnitude,omitempty"`
+	DepthKM              float64             `json:"depth_km,omitempty"`
+	MaxIntensity         string              `json:"max_intensity,omitempty"`
+	Final                bool                `json:"final,omitempty"`
+	Cancel               bool                `json:"cancel,omitempty"`
+	FirstReceived        string              `json:"first_received_at"`
+	LastReceived         string              `json:"last_received_at"`
+	ReportCount          int                 `json:"report_count"`
+	TotalPushed          int                 `json:"total_pushed"`
+	TotalFiltered        int                 `json:"total_filtered"`
+	TotalSkipped         int                 `json:"total_skipped"`
+	TotalFailed          int                 `json:"total_failed"`
+	TotalInvalidBarkKeys int                 `json:"total_invalid_bark_keys"`
+	Latest               adminAuditSummary   `json:"latest"`
+	Reports              []adminAuditSummary `json:"reports"`
 }
 
 type adminAuditFilter struct {
@@ -1505,9 +1506,11 @@ func listDeliveryAuditSummaries(cfg Config, limit int) ([]adminAuditSummary, int
 		if info != nil {
 			modified = info.ModTime()
 		}
+		id := strings.TrimSuffix(entry.Name(), ".summary.json")
+		normalizeLegacyInvalidBarkKeySummary(directory, id, &summary)
 		summary.DetailPath = ""
 		items = append(items, adminAuditSummary{
-			ID:                   strings.TrimSuffix(entry.Name(), ".summary.json"),
+			ID:                   id,
 			Modified:             modified,
 			deliveryAuditSummary: summary,
 		})
@@ -1523,6 +1526,63 @@ func listDeliveryAuditSummaries(cfg Config, limit int) ([]adminAuditSummary, int
 		items = items[:limit]
 	}
 	return items, total, nil
+}
+
+func normalizeInvalidBarkKeyAuditRecord(record *deliveryAuditRecord) bool {
+	if record == nil || record.Status != "failed" || !invalidBarkKeyMessage(record.Error) {
+		return false
+	}
+	record.Status = "invalid_key"
+	record.Reason = "invalid_bark_key"
+	return true
+}
+
+func normalizeLegacyInvalidBarkKeySummary(directory, id string, summary *deliveryAuditSummary) {
+	if summary == nil {
+		return
+	}
+	if summary.StatusCounts == nil {
+		summary.StatusCounts = map[string]int{}
+	}
+	if count, classified := summary.StatusCounts["invalid_key"]; classified {
+		summary.InvalidBarkKeys = count
+		return
+	}
+	invalidCount := 0
+	if summary.Failed > 0 {
+		file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
+		compressed := err == nil
+		if errors.Is(err, os.ErrNotExist) {
+			file, err = os.Open(filepath.Join(directory, id+".jsonl"))
+			compressed = false
+		}
+		if err == nil {
+			defer file.Close()
+			var reader io.Reader = file
+			var gz *gzip.Reader
+			if compressed {
+				gz, err = gzip.NewReader(file)
+				if err == nil {
+					defer gz.Close()
+					reader = gz
+				}
+			}
+			if err == nil {
+				scanner := bufio.NewScanner(io.LimitReader(reader, 64<<20))
+				scanner.Buffer(make([]byte, 64<<10), 2<<20)
+				for scanner.Scan() {
+					var record deliveryAuditRecord
+					if json.Unmarshal(scanner.Bytes(), &record) == nil && normalizeInvalidBarkKeyAuditRecord(&record) {
+						invalidCount++
+					}
+				}
+			}
+		}
+	}
+	summary.InvalidBarkKeys = invalidCount
+	summary.Failed = max(0, summary.Failed-invalidCount)
+	summary.StatusCounts["failed"] = summary.Failed
+	summary.StatusCounts["invalid_key"] = invalidCount
 }
 
 func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []adminAuditEventGroup {
@@ -1612,6 +1672,7 @@ func groupDeliveryAuditSummaries(cfg Config, reports []adminAuditSummary) []admi
 			group.TotalFiltered += report.Filtered
 			group.TotalSkipped += report.Skipped
 			group.TotalFailed += report.Failed
+			group.TotalInvalidBarkKeys += report.InvalidBarkKeys
 			if group.Hypocenter == "" && report.Hypocenter != "" {
 				group.Hypocenter = report.Hypocenter
 			}
@@ -1975,6 +2036,10 @@ func filterAdminAuditGroups(groups []adminAuditEventGroup, filter adminAuditFilt
 			if group.TotalFailed != 0 {
 				continue
 			}
+		case "invalid_key":
+			if group.TotalInvalidBarkKeys == 0 {
+				continue
+			}
 		}
 		groupTime := parseAdminAuditGroupTime(group)
 		if dateFromOK && (groupTime.IsZero() || groupTime.Before(dateFrom)) {
@@ -2063,12 +2128,14 @@ func adminAuditStatusRank(status string) int {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "failed":
 		return 0
-	case "filtered":
+	case "invalid_key":
 		return 1
-	case "skipped":
+	case "filtered":
 		return 2
-	case "pushed":
+	case "skipped":
 		return 3
+	case "pushed":
+		return 4
 	default:
 		return 4
 	}
@@ -2091,6 +2158,7 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "投递审计摘要损坏"})
 		return
 	}
+	normalizeLegacyInvalidBarkKeySummary(directory, id, &summary)
 	summary.DetailPath = ""
 	enrichAuditSummary(&summary, auditHistoryIndex(cfg))
 	file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
@@ -2131,6 +2199,7 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			continue
 		}
+		normalizeInvalidBarkKeyAuditRecord(&record)
 		if statusFilter != "" && record.Status != statusFilter {
 			continue
 		}

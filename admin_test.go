@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -384,6 +385,46 @@ func TestAdminAuditDetailSortsAllMatchingRecordsBeforePagination(t *testing.T) {
 	}
 }
 
+func TestAdminAuditSeparatesLegacyInvalidBarkKeysFromFailures(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, _, _ := adminTestHandler(t, cfg)
+	now := time.Now()
+	event := Event{EventID: "legacy-invalid-key", ReportNum: 1, Type: "cenc_eew", OriginTime: now}
+	record := deliveryAuditRecord{EventID: event.EventID, ReportNum: 1, Type: event.Type, Status: "failed", Reason: "send_error", BarkMasked: "bad***key", BarkHash: "hash", BarkServer: cfg.Bark.Server, Error: `http 500: {"message":"push failed: MissingDeviceToken"}`}
+	if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 0, 1, 0, 1, []deliveryAuditRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	base := auditFileBase(event)
+	summaryPath := filepath.Join(cfg.Server.AuditPath, base+".summary.json")
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy deliveryAuditSummary
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy.StatusCounts, "invalid_key")
+	legacy.InvalidBarkKeys = 0
+	legacy.Failed = 1
+	legacy.StatusCounts["failed"] = 1
+	data, _ = json.Marshal(legacy)
+	if err := os.WriteFile(summaryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, adminRequest(http.MethodGet, "/api/admin/audits", nil, cfg))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"total_failed":0`) || !strings.Contains(list.Body.String(), `"total_invalid_bark_keys":1`) {
+		t.Fatalf("legacy invalid key was not separated in list: status=%d body=%s", list.Code, list.Body.String())
+	}
+	detail := httptest.NewRecorder()
+	handler.ServeHTTP(detail, adminRequest(http.MethodGet, "/api/admin/audit?id="+base+"&status=invalid_key", nil, cfg))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"invalid_bark_keys":1`) || !strings.Contains(detail.Body.String(), `"status":"invalid_key"`) || !strings.Contains(detail.Body.String(), `"total":1`) {
+		t.Fatalf("legacy invalid key was not separated in detail: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}
+
 func TestAdminAuditGroupsReportsForSameEarthquake(t *testing.T) {
 	cfg := adminTestConfig(t)
 	handler, _, _ := adminTestHandler(t, cfg)
@@ -475,7 +516,7 @@ func TestAdminAuditGroupsCrossSourceLegacyEventsByOriginTime(t *testing.T) {
 
 func TestAdminAuditFiltersGroupsAcrossAllCriteria(t *testing.T) {
 	groups := []adminAuditEventGroup{
-		{Title: "四川成都市", EventID: "event-cenc", EventIDs: []string{"event-cenc"}, Source: "中国地震台网", OriginTime: "2026-08-01T09:00:00+08:00", TotalFailed: 2, Reports: []adminAuditSummary{{deliveryAuditSummary: deliveryAuditSummary{Type: "cenc_eew"}}}},
+		{Title: "四川成都市", EventID: "event-cenc", EventIDs: []string{"event-cenc"}, Source: "中国地震台网", OriginTime: "2026-08-01T09:00:00+08:00", TotalFailed: 2, TotalInvalidBarkKeys: 3, Reports: []adminAuditSummary{{deliveryAuditSummary: deliveryAuditSummary{Type: "cenc_eew"}}}},
 		{Title: "熊本県熊本地方", EventID: "event-jma", EventIDs: []string{"event-jma"}, Source: "日本气象厅", OriginTime: "2026-08-02T10:00:00+08:00", Reports: []adminAuditSummary{{deliveryAuditSummary: deliveryAuditSummary{Type: "jma_eew"}}}},
 	}
 	tests := []struct {
@@ -486,6 +527,7 @@ func TestAdminAuditFiltersGroupsAcrossAllCriteria(t *testing.T) {
 		{name: "keyword", filter: adminAuditFilter{Query: "成都"}, wantID: "event-cenc"},
 		{name: "source", filter: adminAuditFilter{Source: "jma_eew"}, wantID: "event-jma"},
 		{name: "failed", filter: adminAuditFilter{Result: "failed"}, wantID: "event-cenc"},
+		{name: "invalid key", filter: adminAuditFilter{Result: "invalid_key"}, wantID: "event-cenc"},
 		{name: "success", filter: adminAuditFilter{Result: "success"}, wantID: "event-jma"},
 		{name: "date", filter: adminAuditFilter{DateFrom: "2026-08-02", DateTo: "2026-08-02"}, wantID: "event-jma"},
 	}

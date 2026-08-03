@@ -4210,6 +4210,7 @@ type deliveryAuditSummary struct {
 	Filtered              int            `json:"filtered"`
 	Skipped               int            `json:"skipped"`
 	Failed                int            `json:"failed"`
+	InvalidBarkKeys       int            `json:"invalid_bark_keys"`
 	Official              int            `json:"official"`
 	SelfHosted            int            `json:"self_hosted"`
 	OfficialConcurrency   int            `json:"official_concurrency"`
@@ -4442,7 +4443,10 @@ func deliveryAuditRecordForTarget(cfg Config, event Event, sub Subscription, dec
 	}
 	if err != nil {
 		record.Error = err.Error()
-		if record.Reason == "" {
+		if record.Status == "failed" && invalidBarkKeyError(err) {
+			record.Status = "invalid_key"
+			record.Reason = "invalid_bark_key"
+		} else if record.Reason == "" {
 			record.Reason = "send_error"
 		}
 	}
@@ -4570,7 +4574,7 @@ func maintainAuditRetention(ctx context.Context, cfg Config) {
 }
 
 func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.Time, totalSubs, officialCount, selfHostedCount, officialConcurrency, selfHostedConcurrency int, records []deliveryAuditRecord, detailPath string) deliveryAuditSummary {
-	statusCounts := map[string]int{}
+	statusCounts := map[string]int{"failed": 0, "invalid_key": 0}
 	reasonCounts := map[string]int{}
 	serverCounts := map[string]int{}
 	levelCounts := map[string]int{}
@@ -4630,6 +4634,7 @@ func buildDeliveryAuditSummary(event Event, receivedAt, startedAt, doneAt time.T
 		Filtered:              statusCounts["filtered"],
 		Skipped:               statusCounts["skipped"],
 		Failed:                statusCounts["failed"],
+		InvalidBarkKeys:       statusCounts["invalid_key"],
 		Official:              officialCount,
 		SelfHosted:            selfHostedCount,
 		OfficialConcurrency:   officialConcurrency,
@@ -6445,6 +6450,9 @@ func retryableBarkError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if invalidBarkKeyError(err) {
+		return false
+	}
 	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
 		if statusErr.StatusCode == http.StatusBadRequest {
@@ -6458,6 +6466,32 @@ func retryableBarkError(err error) bool {
 		return false
 	}
 	return true
+}
+
+func invalidBarkKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return invalidBarkKeyMessage(err.Error())
+}
+
+func invalidBarkKeyMessage(value string) bool {
+	message := strings.ToLower(value)
+	for _, marker := range []string{
+		"device key not found",
+		"missingdevicetoken",
+		"baddevicetoken",
+		"devicetokennotfortopic",
+		"device token invalid",
+		"device token from database",
+		"failed to get device token",
+		"unregistered",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func NewDeduper(keepFor time.Duration) *Deduper {

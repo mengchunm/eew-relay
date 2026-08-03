@@ -1007,6 +1007,25 @@ func TestRetryableBarkError(t *testing.T) {
 	if retryableBarkError(&HTTPStatusError{StatusCode: http.StatusNotFound, Body: "missing key"}) {
 		t.Fatal("404 should not be retryable")
 	}
+	if retryableBarkError(&HTTPStatusError{StatusCode: http.StatusInternalServerError, Body: "push failed: MissingDeviceToken"}) {
+		t.Fatal("a missing device token is permanent even when Bark returns 500")
+	}
+}
+
+func TestInvalidBarkKeysAreSeparatedFromDeliveryFailures(t *testing.T) {
+	cfg := Config{Bark: BarkConfig{Server: "https://bark.example.test"}}
+	now := time.Now()
+	event := Event{EventID: "invalid-key-audit", ReportNum: 1, Type: "cenc_eew", OriginTime: now}
+	sub := Subscription{BarkID: "invalid-key", BarkServer: cfg.Bark.Server}
+	invalidRecord := deliveryAuditRecordForTarget(cfg, event, sub, Decision{}, now, now, "failed", "", "passive", time.Second, now.Add(100*time.Millisecond), false, true, 0, &HTTPStatusError{StatusCode: 500, Body: "push failed: MissingDeviceToken"})
+	failedRecord := deliveryAuditRecordForTarget(cfg, event, Subscription{BarkID: "temporary-key", BarkServer: cfg.Bark.Server}, Decision{}, now, now, "failed", "", "passive", time.Second, now.Add(100*time.Millisecond), false, true, 0, errors.New("connection reset"))
+	if invalidRecord.Status != "invalid_key" || invalidRecord.Reason != "invalid_bark_key" {
+		t.Fatalf("invalid key was not classified separately: %#v", invalidRecord)
+	}
+	summary := buildDeliveryAuditSummary(event, now, now, now.Add(time.Second), 2, 0, 2, 0, 2, []deliveryAuditRecord{invalidRecord, failedRecord}, "detail.jsonl.gz")
+	if summary.Failed != 1 || summary.InvalidBarkKeys != 1 || summary.StatusCounts["failed"] != 1 || summary.StatusCounts["invalid_key"] != 1 {
+		t.Fatalf("unexpected separated audit counts: %#v", summary)
+	}
 }
 
 func TestNormalizeBarkIDInput(t *testing.T) {
