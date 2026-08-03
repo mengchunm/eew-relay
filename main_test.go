@@ -141,7 +141,7 @@ func TestWriteDeliveryAudit(t *testing.T) {
 	sub := Subscription{BarkID: "secretKey", BarkServer: "https://bark.example.test", Latitude: 30.5, Longitude: 104.1}
 	decision := Decision{EstimatedIntensity: 2, EstimatedIntensityRank: 2, DistanceKM: 120.4, HypocentralKM: 121, SecondsToS: 20}
 	started := time.Now()
-	record := deliveryAuditRecordForTarget(cfg, event, sub, decision, started, started, "pushed", "", "active", 150*time.Millisecond, started.Add(80*time.Millisecond), 0, nil)
+	record := deliveryAuditRecordForTarget(cfg, event, sub, decision, started, started, "pushed", "", "active", 150*time.Millisecond, started.Add(80*time.Millisecond), true, true, 0, nil)
 	if strings.Contains(record.BarkMasked, "secretKey") || record.BarkHash == "" {
 		t.Fatalf("audit record should mask and hash bark key: %#v", record)
 	}
@@ -186,6 +186,9 @@ func TestWriteDeliveryAudit(t *testing.T) {
 	}
 	if summary.FirstPassDurationMS != 80 {
 		t.Fatalf("first pass duration=%d want 80", summary.FirstPassDurationMS)
+	}
+	if summary.FirstPassAttempted != 1 || summary.FirstPassSucceeded != 1 || summary.FirstPassFailed != 0 || summary.FirstPassSuccessRate != 100 {
+		t.Fatalf("unexpected first pass delivery result: %#v", summary)
 	}
 	if runtime.GOOS != "windows" {
 		for _, path := range []string{detailPath, summaryPath} {

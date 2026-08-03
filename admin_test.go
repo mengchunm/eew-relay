@@ -126,6 +126,11 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="liveness-prev"`,
 		`官方未验证`,
 		`id="audit-report-list"`,
+		`id="audit-list-search"`,
+		`id="audit-list-source"`,
+		`id="audit-list-result"`,
+		`id="audit-list-prev"`,
+		`首轮全量`,
 		`class="audit-table"`,
 		`data-audit-sort="status"`,
 		`id="audit-records-prev"`,
@@ -313,7 +318,7 @@ func TestAdminAuditAPIReadsSummaryAndMaskedDetails(t *testing.T) {
 	now := time.Now()
 	event := Event{EventID: "audit-test", ReportNum: 2, Type: "sc_eew", OriginTime: now, Magnitude: 5.1}
 	sub := Subscription{BarkID: "sensitive-bark-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104}
-	record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
+	record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, false, false, 0, nil)
 	if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +391,7 @@ func TestAdminAuditGroupsReportsForSameEarthquake(t *testing.T) {
 	sub := Subscription{BarkID: "grouped-key", BarkServer: "https://api.day.app", LocationName: "成都", Latitude: 30, Longitude: 104}
 	for _, reportNum := range []int{1, 3} {
 		event := Event{EventID: "grouped-event", ReportNum: reportNum, Type: "sc_eew", OriginTime: now, Hypocenter: "四川成都市", Latitude: 30.6, Longitude: 104.1, Magnitude: 5.2, DepthKM: 12, MaxIntensity: "6"}
-		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
+		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, false, false, 0, nil)
 		if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 			t.Fatal(err)
 		}
@@ -425,7 +430,7 @@ func TestAdminAuditGroupsSameEarthquakeAcrossSourcesWithoutMergingSameSourceAfte
 		{EventID: "cenc-aftershock", ReportNum: 1, Type: "cenc_eew", OriginTime: now.Add(2 * time.Second), Hypocenter: "华北地区", Latitude: 40, Longitude: 120, Magnitude: 4.8},
 	}
 	for _, event := range events {
-		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, 0, nil)
+		record := deliveryAuditRecordForTarget(cfg, event, sub, Decision{EstimatedIntensity: 3.2}, now, now, "pushed", "", "critical", 120*time.Millisecond, time.Time{}, false, false, 0, nil)
 		if err := writeDeliveryAudit(cfg, event, now, now, now.Add(time.Second), 1, 1, 0, 1, 0, []deliveryAuditRecord{record}); err != nil {
 			t.Fatal(err)
 		}
@@ -465,6 +470,32 @@ func TestAdminAuditGroupsCrossSourceLegacyEventsByOriginTime(t *testing.T) {
 	groups := groupDeliveryAuditSummaries(cfg, reports)
 	if len(groups) != 1 || groups[0].ReportCount != 2 || len(groups[0].Sources) != 2 || groups[0].Title == groups[0].EventID {
 		t.Fatalf("legacy cross-source reports were not grouped with a descriptive title: %#v", groups)
+	}
+}
+
+func TestAdminAuditFiltersGroupsAcrossAllCriteria(t *testing.T) {
+	groups := []adminAuditEventGroup{
+		{Title: "四川成都市", EventID: "event-cenc", EventIDs: []string{"event-cenc"}, Source: "中国地震台网", OriginTime: "2026-08-01T09:00:00+08:00", TotalFailed: 2, Reports: []adminAuditSummary{{deliveryAuditSummary: deliveryAuditSummary{Type: "cenc_eew"}}}},
+		{Title: "熊本県熊本地方", EventID: "event-jma", EventIDs: []string{"event-jma"}, Source: "日本气象厅", OriginTime: "2026-08-02T10:00:00+08:00", Reports: []adminAuditSummary{{deliveryAuditSummary: deliveryAuditSummary{Type: "jma_eew"}}}},
+	}
+	tests := []struct {
+		name   string
+		filter adminAuditFilter
+		wantID string
+	}{
+		{name: "keyword", filter: adminAuditFilter{Query: "成都"}, wantID: "event-cenc"},
+		{name: "source", filter: adminAuditFilter{Source: "jma_eew"}, wantID: "event-jma"},
+		{name: "failed", filter: adminAuditFilter{Result: "failed"}, wantID: "event-cenc"},
+		{name: "success", filter: adminAuditFilter{Result: "success"}, wantID: "event-jma"},
+		{name: "date", filter: adminAuditFilter{DateFrom: "2026-08-02", DateTo: "2026-08-02"}, wantID: "event-jma"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := filterAdminAuditGroups(groups, test.filter)
+			if len(got) != 1 || got[0].EventID != test.wantID {
+				t.Fatalf("filter=%#v got=%#v want=%s", test.filter, got, test.wantID)
+			}
+		})
 	}
 }
 

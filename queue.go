@@ -502,6 +502,8 @@ func fanoutResultsFromResponse(payload relayFanoutRequest, response relayFanoutR
 		if item.FirstAttemptDoneAtUnixMS > 0 {
 			result.FirstAttemptDoneAt = time.UnixMilli(item.FirstAttemptDoneAtUnixMS)
 		}
+		result.FirstAttemptOK = item.FirstAttemptOK
+		result.FirstAttemptKnown = item.FirstAttemptKnown
 		if item.Error != "" {
 			result.Err = errors.New(item.Error)
 		}
@@ -589,6 +591,7 @@ func sendQueuedTargetWithRetry(ctx context.Context, notifier *Notifier, target r
 	durableRetries := 0
 	var lastErr error
 	var firstAttemptDoneAt time.Time
+	var firstAttemptOK bool
 	for {
 		select {
 		case sem <- struct{}{}:
@@ -597,20 +600,23 @@ func sendQueuedTargetWithRetry(ctx context.Context, notifier *Notifier, target r
 			item := relayItemResult{Index: index, Error: lastErr.Error(), Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds()}
 			if !firstAttemptDoneAt.IsZero() {
 				item.FirstAttemptDoneAtUnixMS = firstAttemptDoneAt.UnixMilli()
+				item.FirstAttemptOK = firstAttemptOK
+				item.FirstAttemptKnown = true
 			}
 			return item
 		}
 		if durableRetries > 0 {
 			totalRetries++
 		}
-		retries, roundFirstAttemptDoneAt, err := notifier.SendWithRetryTiming(ctx, target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
+		retries, roundFirstAttemptDoneAt, roundFirstAttemptOK, err := notifier.SendWithRetryTiming(ctx, target.Server, target.Key, target.Title, target.Subtitle, target.Body, target.Params, target.Options)
 		if firstAttemptDoneAt.IsZero() {
 			firstAttemptDoneAt = roundFirstAttemptDoneAt
+			firstAttemptOK = roundFirstAttemptOK
 		}
 		<-sem
 		totalRetries += retries
 		if err == nil {
-			return relayItemResult{Index: index, Pushed: true, Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds(), FirstAttemptDoneAtUnixMS: firstAttemptDoneAt.UnixMilli()}
+			return relayItemResult{Index: index, Pushed: true, Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds(), FirstAttemptDoneAtUnixMS: firstAttemptDoneAt.UnixMilli(), FirstAttemptOK: firstAttemptOK, FirstAttemptKnown: true}
 		}
 		lastErr = err
 		if !retryableBarkError(err) || durableRetries >= cfg.RetryAttempts {
@@ -633,6 +639,8 @@ func sendQueuedTargetWithRetry(ctx context.Context, notifier *Notifier, target r
 	item := relayItemResult{Index: index, Retries: totalRetries, ElapsedMS: time.Since(started).Milliseconds()}
 	if !firstAttemptDoneAt.IsZero() {
 		item.FirstAttemptDoneAtUnixMS = firstAttemptDoneAt.UnixMilli()
+		item.FirstAttemptOK = firstAttemptOK
+		item.FirstAttemptKnown = true
 	}
 	if lastErr != nil {
 		item.Error = lastErr.Error()

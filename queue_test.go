@@ -50,6 +50,9 @@ func TestQueuedTargetRetriesTransientFailuresUntilSuccess(t *testing.T) {
 	if result.FirstAttemptDoneAtUnixMS <= 0 {
 		t.Fatalf("first attempt completion was not recorded: %#v", result)
 	}
+	if !result.FirstAttemptKnown || result.FirstAttemptOK {
+		t.Fatalf("first failed attempt was not recorded separately from retry success: %#v", result)
+	}
 }
 
 func TestQueuedTargetDoesNotRetryPermanentFailure(t *testing.T) {
@@ -84,6 +87,9 @@ func TestQueuedTargetDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 	if result.FirstAttemptDoneAtUnixMS <= 0 {
 		t.Fatalf("first attempt completion was not recorded: %#v", result)
+	}
+	if !result.FirstAttemptKnown || result.FirstAttemptOK {
+		t.Fatalf("permanent first-attempt failure was not recorded: %#v", result)
 	}
 }
 

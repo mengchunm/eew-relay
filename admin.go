@@ -120,6 +120,14 @@ type adminAuditEventGroup struct {
 	Reports       []adminAuditSummary `json:"reports"`
 }
 
+type adminAuditFilter struct {
+	Query    string
+	Source   string
+	Result   string
+	DateFrom string
+	DateTo   string
+}
+
 type auditHistoryCandidate struct {
 	Record     HistoryRecord
 	OriginTime time.Time
@@ -1898,13 +1906,21 @@ func applyAuditHistoryRecord(summary *deliveryAuditSummary, record HistoryRecord
 
 func serveAdminAudits(w http.ResponseWriter, r *http.Request, cfg Config) {
 	offset, limit := parseAdminPage(r, 100, 500)
-	reports, reportTotal, err := listDeliveryAuditSummaries(cfg, 0)
+	reports, _, err := listDeliveryAuditSummaries(cfg, 0)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取投递审计失败"})
 		return
 	}
 	groups := groupDeliveryAuditSummaries(cfg, reports)
+	groups = filterAdminAuditGroups(groups, adminAuditFilter{
+		Query: r.URL.Query().Get("q"), Source: r.URL.Query().Get("source"), Result: r.URL.Query().Get("result"),
+		DateFrom: r.URL.Query().Get("date_from"), DateTo: r.URL.Query().Get("date_to"),
+	})
 	total := len(groups)
+	reportTotal := 0
+	for _, group := range groups {
+		reportTotal += group.ReportCount
+	}
 	if offset > total {
 		offset = total
 	}
@@ -1915,6 +1931,63 @@ func serveAdminAudits(w http.ResponseWriter, r *http.Request, cfg Config) {
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
 		"items": groups[offset:end], "total": total, "report_total": reportTotal, "offset": offset, "limit": limit,
 	}})
+}
+
+func filterAdminAuditGroups(groups []adminAuditEventGroup, filter adminAuditFilter) []adminAuditEventGroup {
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	source := strings.ToLower(strings.TrimSpace(filter.Source))
+	result := strings.ToLower(strings.TrimSpace(filter.Result))
+	dateFrom, dateFromOK := parseAdminFilterDate(filter.DateFrom, false)
+	dateTo, dateToOK := parseAdminFilterDate(filter.DateTo, true)
+	filtered := make([]adminAuditEventGroup, 0, len(groups))
+	for _, group := range groups {
+		if query != "" {
+			searchable := strings.ToLower(strings.Join(append([]string{group.Title, group.Hypocenter, group.Source, group.EventID}, group.EventIDs...), "|"))
+			if !strings.Contains(searchable, query) {
+				continue
+			}
+		}
+		if source != "" {
+			matched := false
+			for _, report := range group.Reports {
+				if strings.ToLower(strings.TrimSpace(report.Type)) == source {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		switch result {
+		case "failed":
+			if group.TotalFailed == 0 {
+				continue
+			}
+		case "success":
+			if group.TotalFailed != 0 {
+				continue
+			}
+		}
+		groupTime := parseAdminAuditGroupTime(group)
+		if dateFromOK && (groupTime.IsZero() || groupTime.Before(dateFrom)) {
+			continue
+		}
+		if dateToOK && (groupTime.IsZero() || !groupTime.Before(dateTo)) {
+			continue
+		}
+		filtered = append(filtered, group)
+	}
+	return filtered
+}
+
+func parseAdminAuditGroupTime(group adminAuditEventGroup) time.Time {
+	for _, value := range []string{group.OriginTime, group.LastReceived} {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }
 
 func validAuditID(value string) bool {
