@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $upstreamCommit = "478659ecdd75a38185d7275d154d78e9c2b752b4"
 $upstreamVersion = "v2.3.5"
-$patchVersion = "eew.1"
+$patchVersion = "eew.2"
 $repo = (git rev-parse --show-toplevel).Trim()
 if (-not $repo) {
     throw "当前目录不在 Git 仓库中。"
@@ -47,9 +47,9 @@ if ($actualUpstreamCommit -ne $upstreamCommit) {
 }
 
 $patchFile = Join-Path $PSScriptRoot "bark-server-v2.3.5-eew.patch"
-& git -C $sourceDir apply --check $patchFile
+& git -C $sourceDir apply --recount --check $patchFile
 if ($LASTEXITCODE -ne 0) { throw "Bark 补丁预检失败。" }
-& git -C $sourceDir apply $patchFile
+& git -C $sourceDir apply --recount $patchFile
 if ($LASTEXITCODE -ne 0) { throw "应用 Bark 补丁失败。" }
 
 $previousToolchain = $env:GOTOOLCHAIN

@@ -70,7 +70,8 @@ index e51c1b1..ae3b355 100644
  )
  
  type MySQL struct {
-+	tokens       sync.Map
++	tokens       map[string]cachedToken
++	tokensMu     sync.RWMutex
 +	cacheTTL     time.Duration
 +	queryTimeout time.Duration
 +}
@@ -104,6 +105,7 @@ index e51c1b1..ae3b355 100644
  	mysqlDB = db
 -	return &MySQL{}
 +	return &MySQL{
++		tokens:       make(map[string]cachedToken),
 +		cacheTTL:     positiveEnvDuration("BARK_SERVER_DEVICE_CACHE_TTL", 10*time.Minute),
 +		queryTimeout: positiveEnvDuration("BARK_SERVER_MYSQL_QUERY_TIMEOUT", 5*time.Second),
 +	}
@@ -114,12 +116,16 @@ index e51c1b1..ae3b355 100644
  }
  
  func (d *MySQL) DeviceTokenByKey(key string) (string, error) {
-+	if value, ok := d.tokens.Load(key); ok {
-+		entry := value.(cachedToken)
++	d.tokensMu.RLock()
++	entry, ok := d.tokens[key]
++	d.tokensMu.RUnlock()
++	if ok {
 +		if time.Now().Before(entry.expiresAt) {
 +			return entry.token, nil
 +		}
-+		d.tokens.Delete(key)
++		d.tokensMu.Lock()
++		delete(d.tokens, key)
++		d.tokensMu.Unlock()
 +	}
 +	ctx, cancel := context.WithTimeout(context.Background(), d.queryTimeout)
 +	defer cancel()
@@ -130,7 +136,9 @@ index e51c1b1..ae3b355 100644
  		return "", err
  	}
  
-+	d.tokens.Store(key, cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)})
++	d.tokensMu.Lock()
++	d.tokens[key] = cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)}
++	d.tokensMu.Unlock()
  	return token, nil
  }
  
@@ -138,14 +146,18 @@ index e51c1b1..ae3b355 100644
  		return "", err
  	}
  
-+	d.tokens.Store(key, cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)})
++	d.tokensMu.Lock()
++	d.tokens[key] = cachedToken{token: token, expiresAt: time.Now().Add(d.cacheTTL)}
++	d.tokensMu.Unlock()
  	return key, nil
  }
  
  func (d *MySQL) DeleteDeviceByKey(key string) error {
  	_, err := mysqlDB.Exec("DELETE FROM `devices` WHERE `key`=?", key)
 +	if err == nil {
-+		d.tokens.Delete(key)
++		d.tokensMu.Lock()
++		delete(d.tokens, key)
++		d.tokensMu.Unlock()
 +	}
  	return err
  }

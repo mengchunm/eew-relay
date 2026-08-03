@@ -9,8 +9,8 @@ RUN git clone --filter=blob:none https://github.com/Finb/bark-server.git /src \
 
 COPY bark-server-v2.3.5-eew.patch /tmp/bark-server.patch
 RUN cd /src \
-    && git apply --check /tmp/bark-server.patch \
-    && git apply /tmp/bark-server.patch
+    && git apply --recount --check /tmp/bark-server.patch \
+    && git apply --recount /tmp/bark-server.patch
 
 FROM golang:1.25.6-alpine AS builder
 
@@ -22,7 +22,7 @@ WORKDIR /src
 # Compile and test the patched leaf packages, then compile the main package.
 RUN go test ./database ./apns
 RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags="-s -w -buildid= -X 'main.version=v2.3.5-eew.1' -X 'main.buildDate=reproducible' -X 'main.commitID=478659ecdd75a38185d7275d154d78e9c2b752b4'" \
+    -ldflags="-s -w -buildid= -X 'main.version=v2.3.5-eew.2' -X 'main.buildDate=reproducible' -X 'main.commitID=478659ecdd75a38185d7275d154d78e9c2b752b4'" \
     -o /out/bark-server .
 
 FROM alpine:3.22
