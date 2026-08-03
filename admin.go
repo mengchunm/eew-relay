@@ -129,6 +129,21 @@ type adminAuditFilter struct {
 	DateTo   string
 }
 
+type adminSubscriptionAuditItem struct {
+	AuditID string              `json:"audit_id"`
+	Summary adminAuditSummary   `json:"summary"`
+	Record  deliveryAuditRecord `json:"record"`
+}
+
+type adminSubscriptionAuditRequest struct {
+	BarkID   string `json:"bark_id"`
+	Status   string `json:"status,omitempty"`
+	DateFrom string `json:"date_from,omitempty"`
+	DateTo   string `json:"date_to,omitempty"`
+	Offset   int    `json:"offset,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
 type legacyInvalidBarkKeyCacheEntry struct {
 	ModifiedUnixNano int64
 	Size             int64
@@ -431,6 +446,9 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 	}))
 	mux.HandleFunc("GET /api/admin/audit", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		serveAdminAuditDetail(w, r, cfg)
+	}))
+	mux.HandleFunc("POST /api/admin/subscription-audits/search", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		serveAdminSubscriptionAudits(w, r, cfg, store)
 	}))
 	mux.HandleFunc("POST /api/admin/test", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		if !auth.testLimiter.Allow(clientIP(r), time.Now()) {
@@ -2251,6 +2269,162 @@ func serveAdminAuditDetail(w http.ResponseWriter, r *http.Request, cfg Config) {
 	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
 		"id": id, "summary": summary, "records": matching[offset:end], "total": total, "offset": offset, "limit": limit, "sort_by": sortBy, "sort_order": sortOrder,
 	}})
+}
+
+func serveAdminSubscriptionAudits(w http.ResponseWriter, r *http.Request, cfg Config, store *Store) {
+	startedAt := time.Now()
+	var request adminSubscriptionAuditRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "订阅通知历史查询格式错误"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "订阅通知历史查询格式错误"})
+		return
+	}
+	barkID, _, err := normalizeBarkInput(request.BarkID, "", cfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	statusFilter := strings.ToLower(strings.TrimSpace(request.Status))
+	switch statusFilter {
+	case "", "pushed", "failed", "invalid_key", "filtered", "skipped":
+	default:
+		writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "通知状态筛选无效"})
+		return
+	}
+	offset, limit := request.Offset, request.Limit
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	dateFrom, dateFromOK := parseAdminFilterDate(request.DateFrom, false)
+	dateTo, dateToOK := parseAdminFilterDate(request.DateTo, true)
+	reports, _, err := listDeliveryAuditSummaries(cfg, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取投递审计失败"})
+		return
+	}
+	directory := auditDirectory(cfg)
+	keyHash := hashKey(barkID)
+	statusCounts := map[string]int{}
+	items := make([]adminSubscriptionAuditItem, 0)
+	historyIndex := auditHistoryIndex(cfg)
+	for _, report := range reports {
+		if err := r.Context().Err(); err != nil {
+			return
+		}
+		reportTime := adminAuditSummaryTime(report)
+		if dateFromOK && (reportTime.IsZero() || reportTime.Before(dateFrom)) {
+			continue
+		}
+		if dateToOK && (reportTime.IsZero() || !reportTime.Before(dateTo)) {
+			continue
+		}
+		record, found, err := findDeliveryAuditRecordByHash(directory, report.ID, keyHash)
+		if err != nil {
+			log.Printf("read subscription delivery audit id=%s: %v", report.ID, err)
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "读取订阅历史通知失败"})
+			return
+		}
+		if !found {
+			continue
+		}
+		statusCounts[record.Status]++
+		if statusFilter != "" && record.Status != statusFilter {
+			continue
+		}
+		enrichAuditSummary(&report.deliveryAuditSummary, historyIndex)
+		report.DetailPath = ""
+		items = append(items, adminSubscriptionAuditItem{AuditID: report.ID, Summary: report, Record: record})
+	}
+	total := len(items)
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	current := map[string]any(nil)
+	subscriptionExists := false
+	if store != nil {
+		if sub, ok := store.Get(barkID); ok {
+			subscriptionExists = true
+			current = map[string]any{
+				"bark_masked": maskKey(sub.BarkID), "bark_server": sub.BarkServer, "location_name": sub.LocationName,
+				"locations": sub.Locations, "notify_bands": sub.NotifyBands, "updated_at": sub.UpdatedAt,
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: map[string]any{
+		"bark_masked": maskKey(barkID), "subscription_exists": subscriptionExists, "subscription": current,
+		"items": items[offset:end], "total": total, "matched_total": sumAdminAuditStatusCounts(statusCounts),
+		"status_counts": statusCounts, "offset": offset, "limit": limit, "status": statusFilter,
+		"duration_ms": time.Since(startedAt).Milliseconds(),
+	}})
+}
+
+func adminAuditSummaryTime(summary adminAuditSummary) time.Time {
+	for _, value := range []string{summary.ReceivedAt, summary.OriginTime} {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+			return parsed
+		}
+	}
+	return summary.Modified
+}
+
+func findDeliveryAuditRecordByHash(directory, id, keyHash string) (deliveryAuditRecord, bool, error) {
+	var empty deliveryAuditRecord
+	file, err := os.Open(filepath.Join(directory, id+".jsonl.gz"))
+	compressed := err == nil
+	if errors.Is(err, os.ErrNotExist) {
+		file, err = os.Open(filepath.Join(directory, id+".jsonl"))
+		compressed = false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return empty, false, nil
+	}
+	if err != nil {
+		return empty, false, err
+	}
+	defer file.Close()
+	var reader io.Reader = file
+	if compressed {
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return empty, false, err
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	scanner := bufio.NewScanner(io.LimitReader(reader, 64<<20))
+	scanner.Buffer(make([]byte, 64<<10), 2<<20)
+	for scanner.Scan() {
+		var record deliveryAuditRecord
+		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.BarkHash != keyHash {
+			continue
+		}
+		normalizeInvalidBarkKeyAuditRecord(&record)
+		return record, true, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return empty, false, err
+	}
+	return empty, false, nil
+}
+
+func sumAdminAuditStatusCounts(counts map[string]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
 }
 
 func serveAdminTest(w http.ResponseWriter, r *http.Request, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier) {

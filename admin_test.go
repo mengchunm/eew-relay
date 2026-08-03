@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -131,6 +132,10 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="audit-list-source"`,
 		`id="audit-list-result"`,
 		`id="audit-list-prev"`,
+		`id="key-history-key"`,
+		`id="key-history-status"`,
+		`class="btn btn-secondary btn-sm sub-history"`,
+		`/api/admin/subscription-audits/search`,
 		`首轮全量`,
 		`class="audit-table"`,
 		`data-audit-sort="status"`,
@@ -382,6 +387,76 @@ func TestAdminAuditDetailSortsAllMatchingRecordsBeforePagination(t *testing.T) {
 		if statusPage.Records[index].Status != want {
 			t.Fatalf("status sort index=%d got=%q want=%q records=%#v", index, statusPage.Records[index].Status, want, statusPage.Records)
 		}
+	}
+}
+
+func TestAdminSubscriptionAuditHistoryByFullKey(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, store, _ := adminTestHandler(t, cfg)
+	key := "subscription-history-sensitive-key"
+	sub := Subscription{BarkID: key, BarkServer: cfg.Bark.Server, LocationName: "成都", Latitude: 30.67, Longitude: 104.06}
+	if err := store.Upsert(sub); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	cases := []struct {
+		event  Event
+		status string
+		reason string
+		err    error
+	}{
+		{event: Event{EventID: "history-pushed", ReportNum: 1, Type: "cenc_eew", OriginTime: now.Add(-2 * time.Hour), Hypocenter: "四川成都", Magnitude: 4.2}, status: "pushed"},
+		{event: Event{EventID: "history-filtered", ReportNum: 2, Type: "sc_eew", OriginTime: now.Add(-time.Hour), Hypocenter: "四川成都", Magnitude: 3.1}, status: "filtered", reason: "notify_band"},
+		{event: Event{EventID: "history-failed", ReportNum: 3, Type: "sc_eew", OriginTime: now, Hypocenter: "四川成都", Magnitude: 4.8}, status: "failed", err: errors.New("connection reset")},
+	}
+	for _, item := range cases {
+		recordedAt := item.event.OriginTime.Add(time.Second)
+		record := deliveryAuditRecordForTarget(cfg, item.event, sub, Decision{EstimatedIntensity: 2.4, DistanceKM: 12.3}, recordedAt, recordedAt, item.status, item.reason, "active", 120*time.Millisecond, recordedAt.Add(80*time.Millisecond), item.status == "pushed", true, 0, item.err)
+		if err := writeDeliveryAudit(cfg, item.event, recordedAt, recordedAt, recordedAt.Add(time.Second), 1, 0, 1, 0, 1, []deliveryAuditRecord{record}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	body, _ := json.Marshal(adminSubscriptionAuditRequest{BarkID: key, Limit: 2})
+	handler.ServeHTTP(recorder, adminRequest(http.MethodPost, "/api/admin/subscription-audits/search", body, cfg))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("history status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			SubscriptionExists bool                         `json:"subscription_exists"`
+			Total              int                          `json:"total"`
+			MatchedTotal       int                          `json:"matched_total"`
+			StatusCounts       map[string]int               `json:"status_counts"`
+			Items              []adminSubscriptionAuditItem `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Data.SubscriptionExists || response.Data.Total != 3 || response.Data.MatchedTotal != 3 || len(response.Data.Items) != 2 {
+		t.Fatalf("unexpected history response: %#v", response.Data)
+	}
+	if response.Data.StatusCounts["pushed"] != 1 || response.Data.StatusCounts["filtered"] != 1 || response.Data.StatusCounts["failed"] != 1 {
+		t.Fatalf("unexpected status counts: %#v", response.Data.StatusCounts)
+	}
+	if strings.Contains(recorder.Body.String(), key) {
+		t.Fatalf("full Bark Key leaked in response: %s", recorder.Body.String())
+	}
+	filtered := httptest.NewRecorder()
+	body, _ = json.Marshal(adminSubscriptionAuditRequest{BarkID: key, Status: "filtered"})
+	handler.ServeHTTP(filtered, adminRequest(http.MethodPost, "/api/admin/subscription-audits/search", body, cfg))
+	if filtered.Code != http.StatusOK || !strings.Contains(filtered.Body.String(), "notify_band") || strings.Contains(filtered.Body.String(), "history-pushed") {
+		t.Fatalf("filtered history status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	if err := store.Delete(key); err != nil {
+		t.Fatal(err)
+	}
+	deleted := httptest.NewRecorder()
+	body, _ = json.Marshal(adminSubscriptionAuditRequest{BarkID: key})
+	handler.ServeHTTP(deleted, adminRequest(http.MethodPost, "/api/admin/subscription-audits/search", body, cfg))
+	if deleted.Code != http.StatusOK || !strings.Contains(deleted.Body.String(), `"subscription_exists":false`) || !strings.Contains(deleted.Body.String(), "history-pushed") {
+		t.Fatalf("deleted subscription history status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 }
 
