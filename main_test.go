@@ -574,7 +574,7 @@ func TestFormatAlertUsesWarningCopy(t *testing.T) {
 func TestAddBarkIconParam(t *testing.T) {
 	params := map[string]string{"url": "https://example.com/alert/x"}
 	addBarkIconParam(Config{Server: ServerConfig{PublicURL: "https://eew.example.test/"}}, params, "critical")
-	if params["icon"] != "https://eew.example.test/bark-icon.png?level=high&v=10" {
+	if params["icon"] != "https://eew.example.test/bark-icon-high.png?v=11" {
 		t.Fatalf("unexpected bark icon url: %#v", params)
 	}
 
@@ -586,6 +586,31 @@ func TestAddBarkIconParam(t *testing.T) {
 
 	if barkIconLevelForNotifyLevel("passive") != "low" || barkIconLevelForNotifyLevel("active") != "medium" || barkIconLevelForNotifyLevel("critical") != "high" {
 		t.Fatal("unexpected level icon mapping")
+	}
+}
+
+func TestNotifierAlwaysSuppliesConfiguredBarkIcon(t *testing.T) {
+	icons := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		icons <- r.Form.Get("icon")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200}`))
+	}))
+	defer server.Close()
+
+	notifier := NewNotifier(BarkConfig{Server: server.URL, IconBaseURL: "https://eew.example.test", Group: "test"})
+	if err := notifier.Send(context.Background(), server.URL, "fallback-key", "title", "subtitle", "body", nil, PushOptions{Level: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-icons; got != "https://eew.example.test/bark-icon-medium.png?v=11" {
+		t.Fatalf("missing fallback icon: %q", got)
+	}
+	if err := notifier.Send(context.Background(), server.URL, "explicit-key", "title", "subtitle", "body", map[string]string{"icon": "https://cdn.example.test/custom.png"}, PushOptions{Level: "critical"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-icons; got != "https://cdn.example.test/custom.png" {
+		t.Fatalf("explicit icon was overwritten: %q", got)
 	}
 }
 

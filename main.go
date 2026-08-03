@@ -97,6 +97,7 @@ type BarkConfig struct {
 	Group                    string `yaml:"group"`
 	Call                     bool   `yaml:"call"`
 	RequestTimeoutSeconds    int    `yaml:"request_timeout_seconds"`
+	IconBaseURL              string `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -515,6 +516,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	cfg.Bark.IconBaseURL = cfg.Server.PublicURL
 	if *repairNotificationBands || *repairNotificationBandsDryRun {
 		store, err := NewConfiguredStore(cfg.Server.DataPath, cfg.Server.PostgresDSN)
 		if err != nil {
@@ -6151,11 +6153,17 @@ func clickURL(cfg Config, alertCache *AlertCache, event Event, decision Decision
 }
 
 func addBarkIconParam(cfg Config, params map[string]string, level string) {
-	publicURL := strings.TrimRight(strings.TrimSpace(cfg.Server.PublicURL), "/")
-	if publicURL == "" {
-		return
+	if iconURL := barkIconURL(cfg.Server.PublicURL, level); iconURL != "" {
+		params["icon"] = iconURL
 	}
-	params["icon"] = publicURL + "/bark-icon.png?level=" + barkIconLevelForNotifyLevel(level) + "&v=10"
+}
+
+func barkIconURL(baseURL, level string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
+	return baseURL + "/bark-icon-" + barkIconLevelForNotifyLevel(level) + ".png?v=11"
 }
 
 func barkIconLevelForNotifyLevel(level string) string {
@@ -6354,6 +6362,11 @@ func (n *Notifier) Send(ctx context.Context, server, key, title, subtitle, body 
 	form.Set("group", n.cfg.Group)
 	level := fallback(options.Level, n.cfg.Level)
 	form.Set("level", level)
+	if icon, supplied := extra["icon"]; !supplied || strings.TrimSpace(icon) == "" {
+		if iconURL := barkIconURL(n.cfg.IconBaseURL, level); iconURL != "" {
+			form.Set("icon", iconURL)
+		}
+	}
 	sound := options.Sound
 	if sound == "" && level != "passive" {
 		sound = n.cfg.Sound
