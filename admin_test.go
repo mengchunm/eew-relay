@@ -134,6 +134,9 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="audit-list-prev"`,
 		`id="key-history-key"`,
 		`id="key-history-status"`,
+		`id="key-history-dialog"`,
+		`id="open-key-history"`,
+		`data-close="key-history-dialog"`,
 		`class="btn btn-secondary btn-sm sub-history"`,
 		`/api/admin/subscription-audits/search`,
 		`首轮全量`,
@@ -158,6 +161,9 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 	}
 	if strings.Contains(body, cfg.Server.AdminPassword) {
 		t.Fatalf("unexpected admin page body")
+	}
+	if strings.Contains(body, `class="panel key-history-panel"`) {
+		t.Fatalf("subscription notification history must use a dialog instead of occupying the audit view")
 	}
 }
 
