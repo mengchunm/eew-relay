@@ -147,6 +147,11 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`@media(max-width:430px)`,
 		`class="audit-mobile-toggle audit-toggle"`,
 		`class="responsive-table subscriptions-table"`,
+		`.subscriptions-table{table-layout:auto}`,
+		`.subscriptions-table th,.subscriptions-table td{width:auto;min-width:0}`,
+		`.subscriptions-table .badge{white-space:normal}`,
+		`.section-head.actions-only{justify-content:flex-end}`,
+		`locationLines=locations.map(location=>escapeHTML(location)).join("<br>")`,
 		`#subscriptions-body td[data-label="选择"]`,
 		`class="btn btn-secondary btn-sm sub-history"`,
 		`/api/admin/subscription-audits/search`,
@@ -183,6 +188,27 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 	}
 	if strings.Contains(body, `.table-wrap{overflow:auto`) {
 		t.Fatalf("admin tables must not require horizontal scrolling")
+	}
+	if strings.Contains(body, `<table class="responsive-table subscriptions-table"><colgroup`) {
+		t.Fatalf("subscription columns must not use fixed colgroup widths")
+	}
+	for _, redundant := range []string{
+		`<h3>系统概览</h3>`,
+		`<h3>服务健康历史</h3>`,
+		`<h3>Worker 管理</h3>`,
+		`<h3>订阅管理</h3>`,
+		`<h3>历史地震通知</h3>`,
+		`<h3>系统测试</h3>`,
+		`订阅规模、数据源状态与投递组件实时概况。`,
+		`服务器每分钟记录一次状态，可查看最近 24 小时、7 天或 30 天；空白表示当时没有采样记录。`,
+		`通过 NATS 统一管理不同服务器上的推送 Worker；暂停和排空不会停止容器，也不会删除 JetStream 任务。`,
+		`筛选和排序订阅、批量新增、无推送测活、测试单个用户或删除无效订阅。`,
+		`同一地震的多个报次和不同台站消息会归纳展示，可查看震中、震级、深度、烈度及每报投递变化。`,
+		`先查看组件自检，再向一个已订阅 Bark Key 发送受控测试。`,
+	} {
+		if strings.Contains(body, redundant) {
+			t.Fatalf("admin view repeats its topbar title or introduction: %q", redundant)
+		}
 	}
 }
 

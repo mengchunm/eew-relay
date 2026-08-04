@@ -20,7 +20,8 @@ const (
 	subscriptionLivenessDeviceTokenMissing   = "device_token_missing"
 	subscriptionLivenessConfigurationInvalid = "configuration_invalid"
 	subscriptionLivenessOfficialUnverified   = "official_unverified"
-	subscriptionLivenessFileVersion          = 1
+	subscriptionLivenessFileVersion          = 2
+	subscriptionLivenessLegacyFileVersion    = 1
 )
 
 type SubscriptionLivenessRecord struct {
@@ -28,6 +29,7 @@ type SubscriptionLivenessRecord struct {
 	CheckedAt             string `json:"checked_at,omitempty"`
 	Message               string `json:"message,omitempty"`
 	SubscriptionUpdatedAt int64  `json:"subscription_updated_at"`
+	BarkServer            string `json:"bark_server,omitempty"`
 }
 
 type subscriptionLivenessFile struct {
@@ -39,12 +41,14 @@ type subscriptionLivenessFile struct {
 type subscriptionLivenessStore struct {
 	mu        sync.RWMutex
 	path      string
+	version   int
 	updatedAt string
+	bark      BarkConfig
 	records   map[string]SubscriptionLivenessRecord
 }
 
 func newSubscriptionLivenessStore(cfg Config) (*subscriptionLivenessStore, error) {
-	store := &subscriptionLivenessStore{records: make(map[string]SubscriptionLivenessRecord)}
+	store := &subscriptionLivenessStore{version: subscriptionLivenessFileVersion, bark: cfg.Bark, records: make(map[string]SubscriptionLivenessRecord)}
 	dataPath := strings.TrimSpace(cfg.Server.DataPath)
 	if dataPath == "" {
 		return store, nil
@@ -69,7 +73,7 @@ func newSubscriptionLivenessStore(cfg Config) (*subscriptionLivenessStore, error
 		}
 		return nil, err
 	}
-	if stored.Version != subscriptionLivenessFileVersion {
+	if stored.Version != subscriptionLivenessLegacyFileVersion && stored.Version != subscriptionLivenessFileVersion {
 		return nil, fmt.Errorf("unsupported subscription liveness label version %d", stored.Version)
 	}
 	for barkID, record := range stored.Records {
@@ -81,6 +85,7 @@ func newSubscriptionLivenessStore(cfg Config) (*subscriptionLivenessStore, error
 		}
 		store.records[barkID] = record
 	}
+	store.version = stored.Version
 	store.updatedAt = strings.TrimSpace(stored.UpdatedAt)
 	return store, nil
 }
@@ -118,10 +123,63 @@ func (s *subscriptionLivenessStore) Snapshot(sub Subscription) SubscriptionLiven
 	s.mu.RLock()
 	record, ok := s.records[sub.BarkID]
 	s.mu.RUnlock()
-	if !ok || record.SubscriptionUpdatedAt != sub.UpdatedAt {
+	if !ok || !s.recordMatchesSubscription(record, sub) {
 		return SubscriptionLivenessRecord{Status: subscriptionLivenessUntested, Message: "尚未测活"}
 	}
 	return record
+}
+
+func (s *subscriptionLivenessStore) recordMatchesSubscription(record SubscriptionLivenessRecord, sub Subscription) bool {
+	recordServer := strings.TrimRight(strings.TrimSpace(record.BarkServer), "/")
+	if recordServer == "" {
+		// Version 1 records did not persist the Bark server. Keep their old
+		// timestamp behavior only until startup migration can bind them safely.
+		return record.SubscriptionUpdatedAt == sub.UpdatedAt
+	}
+	return recordServer == s.subscriptionServer(sub)
+}
+
+func (s *subscriptionLivenessStore) subscriptionServer(sub Subscription) string {
+	return normalizeBarkServer(sub.BarkServer, Config{Bark: s.bark})
+}
+
+// MigrateLegacy binds version 1 labels to the current Bark server only when
+// the subscription has not changed since it was measured. This preserves all
+// trustworthy labels without guessing about already-stale records.
+func (s *subscriptionLivenessStore) MigrateLegacy(subscriptions []Subscription) (int, error) {
+	if s == nil || s.path == "" {
+		return 0, nil
+	}
+	active := make(map[string]Subscription, len(subscriptions))
+	for _, sub := range subscriptions {
+		active[sub.BarkID] = sub
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]SubscriptionLivenessRecord, len(s.records))
+	for barkID, record := range s.records {
+		next[barkID] = record
+	}
+	migrated := 0
+	for barkID, record := range next {
+		if strings.TrimSpace(record.BarkServer) != "" {
+			continue
+		}
+		sub, ok := active[barkID]
+		if !ok || record.SubscriptionUpdatedAt != sub.UpdatedAt {
+			continue
+		}
+		record.BarkServer = s.subscriptionServer(sub)
+		next[barkID] = record
+		migrated++
+	}
+	if migrated == 0 && s.version == subscriptionLivenessFileVersion {
+		return 0, nil
+	}
+	if err := s.persistLocked(next, s.updatedAt); err != nil {
+		return 0, err
+	}
+	return migrated, nil
 }
 
 func (s *subscriptionLivenessStore) Update(records map[string]SubscriptionLivenessRecord, subscriptions []Subscription, now time.Time) error {
@@ -139,7 +197,7 @@ func (s *subscriptionLivenessStore) Update(records map[string]SubscriptionLivene
 	next := make(map[string]SubscriptionLivenessRecord, len(s.records)+len(records))
 	for barkID, record := range s.records {
 		sub, ok := active[barkID]
-		if ok && record.SubscriptionUpdatedAt == sub.UpdatedAt {
+		if ok && s.recordMatchesSubscription(record, sub) {
 			next[barkID] = record
 		}
 	}
@@ -150,9 +208,17 @@ func (s *subscriptionLivenessStore) Update(records map[string]SubscriptionLivene
 		}
 		record.CheckedAt = checkedAt
 		record.SubscriptionUpdatedAt = sub.UpdatedAt
+		record.BarkServer = s.subscriptionServer(sub)
 		next[barkID] = record
 	}
-	payload := subscriptionLivenessFile{Version: subscriptionLivenessFileVersion, UpdatedAt: checkedAt, Records: next}
+	if err := s.persistLocked(next, checkedAt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *subscriptionLivenessStore) persistLocked(next map[string]SubscriptionLivenessRecord, updatedAt string) error {
+	payload := subscriptionLivenessFile{Version: subscriptionLivenessFileVersion, UpdatedAt: updatedAt, Records: next}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
@@ -181,8 +247,9 @@ func (s *subscriptionLivenessStore) Update(records map[string]SubscriptionLivene
 	if err := os.Rename(tempName, s.path); err != nil {
 		return err
 	}
+	s.version = subscriptionLivenessFileVersion
 	s.records = next
-	s.updatedAt = checkedAt
+	s.updatedAt = updatedAt
 	return nil
 }
 

@@ -577,6 +577,15 @@ func main() {
 		log.Fatalf("load subscriptions: %v", err)
 	}
 	defer store.Close()
+	if cfg.subscriptionLiveness != nil {
+		migrated, err := cfg.subscriptionLiveness.MigrateLegacy(store.List())
+		if err != nil {
+			log.Fatalf("migrate subscription liveness labels: %v", err)
+		}
+		if migrated > 0 {
+			log.Printf("subscription liveness labels migrated=%d", migrated)
+		}
+	}
 	if *refreshLocationNames {
 		updated, removed, err := refreshStoredSubscriptionLocations(context.Background(), store)
 		if err != nil {
