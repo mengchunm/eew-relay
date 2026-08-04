@@ -2425,6 +2425,7 @@ func TestEarthquakeDeduperPrefersFirstCrossSourceReport(t *testing.T) {
 	if !firstDecision.Dispatch || !firstDecision.First || firstResult.Type != "cenc_eew" {
 		t.Fatalf("first received source should win: event=%#v decision=%#v", firstResult, firstDecision)
 	}
+	deduper.CompleteDispatch(firstDecision, firstResult, true)
 	laterResult, laterDecision := deduper.Evaluate(later, cfg, now.Add(time.Second))
 	if laterDecision.Dispatch || laterDecision.First {
 		t.Fatalf("source/report/final/minor physical differences should not push: event=%#v decision=%#v", laterResult, laterDecision)
@@ -2446,9 +2447,11 @@ func TestEarthquakeDeduperAccumulatesChangesAgainstLastPushedVersion(t *testing.
 	}
 	deduper := NewDeduper(2 * time.Hour)
 	cfg := AlertConfig{PushUpdates: true}
-	if _, decision := deduper.Evaluate(base, cfg, now); !decision.Dispatch {
+	baseResult, baseDecision := deduper.Evaluate(base, cfg, now)
+	if !baseDecision.Dispatch {
 		t.Fatal("initial report was not dispatched")
 	}
+	deduper.CompleteDispatch(baseDecision, baseResult, true)
 
 	minor := base
 	minor.ReportNum = 2
@@ -2468,6 +2471,68 @@ func TestEarthquakeDeduperAccumulatesChangesAgainstLastPushedVersion(t *testing.
 	}
 }
 
+func TestEarthquakeDeduperRequiresCompletedInitialDeliveryBeforeRevision(t *testing.T) {
+	now := time.Now()
+	base := Event{
+		Type: "cenc_eew", EventID: "completion-gate", ReportNum: 1,
+		OriginTime: now, Latitude: 30.6, Longitude: 104.1, Magnitude: 5.0, DepthKM: 10,
+	}
+	deduper := NewDeduper(time.Hour)
+	cfg := AlertConfig{PushUpdates: true}
+	baseResult, baseDecision := deduper.Evaluate(base, cfg, now)
+	if !baseDecision.Dispatch || !baseDecision.First {
+		t.Fatalf("initial report was not reserved: %#v", baseDecision)
+	}
+
+	whileSending := base
+	whileSending.ReportNum = 2
+	whileSending.Magnitude = 5.4
+	if result, decision := deduper.Evaluate(whileSending, cfg, now.Add(time.Millisecond)); decision.Dispatch || result.Revision {
+		t.Fatalf("revision dispatched before initial fanout completed: event=%#v decision=%#v", result, decision)
+	}
+
+	deduper.CompleteDispatch(baseDecision, baseResult, false)
+	retry := whileSending
+	retry.ReportNum = 3
+	result, decision := deduper.Evaluate(retry, cfg, now.Add(2*time.Millisecond))
+	if !decision.Dispatch || !decision.First || result.Revision {
+		t.Fatalf("report after failed initial fanout must remain an initial warning: event=%#v decision=%#v", result, decision)
+	}
+	deduper.CompleteDispatch(decision, result, true)
+
+	revision := retry
+	revision.ReportNum = 4
+	revision.Magnitude = 5.8
+	result, decision = deduper.Evaluate(revision, cfg, now.Add(3*time.Millisecond))
+	if !decision.Dispatch || decision.First || !result.Revision {
+		t.Fatalf("completed initial warning did not unlock revisions: event=%#v decision=%#v", result, decision)
+	}
+}
+
+func TestRevisionNotificationIDDoesNotReplaceInitialWarning(t *testing.T) {
+	base := Event{
+		Type: "cenc_eew", EventID: "separate-notification", ReportNum: 1,
+		CanonicalID: "quake-20260804", OriginTime: time.Unix(100, 0),
+		Latitude: 30.6, Longitude: 104.1, Magnitude: 5.0, DepthKM: 10,
+	}
+	revision := base
+	revision.Revision = true
+	revision.ReportNum = 2
+	revision.Magnitude = 5.4
+	if pushNotificationID(base) == pushNotificationID(revision) {
+		t.Fatal("revision reused the initial Bark notification ID")
+	}
+	if pushNotificationID(revision) != pushNotificationID(revision) {
+		t.Fatal("revision Bark notification ID is not deterministic")
+	}
+	laterRevision := revision
+	laterRevision.ReportNum = 3
+	laterRevision.Magnitude = 5.8
+	if pushNotificationID(revision) == pushNotificationID(laterRevision) {
+		t.Fatal("separate revisions reused one Bark notification ID")
+	}
+}
+
 func TestEarthquakeDeduperIgnoresEquivalentAgencyIntensityScales(t *testing.T) {
 	now := time.Now()
 	base := Event{
@@ -2480,7 +2545,8 @@ func TestEarthquakeDeduperIgnoresEquivalentAgencyIntensityScales(t *testing.T) {
 	}
 	deduper := NewDeduper(time.Hour)
 	cfg := AlertConfig{PushUpdates: true}
-	deduper.Evaluate(base, cfg, now)
+	baseResult, baseDecision := deduper.Evaluate(base, cfg, now)
+	deduper.CompleteDispatch(baseDecision, baseResult, true)
 	if _, decision := deduper.Evaluate(jma, cfg, now.Add(time.Second)); decision.Dispatch {
 		t.Fatalf("equivalent CENC/JMA intensity representations should not dispatch: %#v", decision)
 	}
@@ -2539,7 +2605,8 @@ func TestEarthquakeCancellationAlwaysDispatches(t *testing.T) {
 	now := time.Now()
 	base := Event{Type: "cenc_eew", EventID: "cancel-me", OriginTime: now, Latitude: 30, Longitude: 104, Magnitude: 5, DepthKM: 10}
 	deduper := NewDeduper(time.Hour)
-	deduper.Evaluate(base, AlertConfig{}, now)
+	baseResult, baseDecision := deduper.Evaluate(base, AlertConfig{}, now)
+	deduper.CompleteDispatch(baseDecision, baseResult, true)
 	cancel := Event{Type: base.Type, EventID: base.EventID, ReportNum: 2, Cancel: true}
 	result, decision := deduper.Evaluate(cancel, AlertConfig{PushUpdates: false}, now.Add(time.Second))
 	if !decision.Dispatch || !result.Cancel || !result.Revision || !containsString(decision.Reasons, "cancellation") {
@@ -2583,14 +2650,27 @@ func TestFormatAlertMarksMeaningfulRevision(t *testing.T) {
 		Magnitude: 5.3, DepthKM: 20, Revision: true, RevisionFields: []string{"magnitude", "depth"},
 	}
 	title, _, body := formatAlert(event, Decision{}, Subscription{})
-	if !strings.Contains(title, "地震警报修订") || !strings.Contains(body, "[修订] 震级、震源深度发生显著变化") {
-		t.Fatalf("revision was not made clear in notification: title=%q body=%q", title, body)
+	if !strings.Contains(title, "地震警报修订") {
+		t.Fatalf("revision title missing: title=%q body=%q", title, body)
+	}
+	if strings.Contains(body, "[修订]") || strings.Contains(body, "以下为最新信息") {
+		t.Fatalf("redundant revision sentence remains: title=%q body=%q", title, body)
 	}
 }
 
 func TestHandlePayloadSendsOneCrossSourceAlertAndOneMaterialRevision(t *testing.T) {
 	var pushes atomic.Int32
-	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var requestMu sync.Mutex
+	var notificationIDs, titles, bodies []string
+	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse Bark request: %v", err)
+		}
+		requestMu.Lock()
+		notificationIDs = append(notificationIDs, r.Form.Get("id"))
+		titles = append(titles, r.Form.Get("title"))
+		bodies = append(bodies, r.Form.Get("body"))
+		requestMu.Unlock()
 		pushes.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
@@ -2641,6 +2721,78 @@ func TestHandlePayloadSendsOneCrossSourceAlertAndOneMaterialRevision(t *testing.
 	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload("cq_eew", "cq-9", 2, 5.3), time.Now().Add(2*time.Millisecond))
 	if pushes.Load() != 2 {
 		t.Fatalf("material revision produced total %d pushes, want 2", pushes.Load())
+	}
+	requestMu.Lock()
+	defer requestMu.Unlock()
+	if len(notificationIDs) != 2 || notificationIDs[0] == "" || notificationIDs[0] == notificationIDs[1] {
+		t.Fatalf("initial and revision Bark IDs must be distinct: %#v", notificationIDs)
+	}
+	if !strings.Contains(titles[1], "地震警报修订") || strings.Contains(bodies[1], "[修订]") || strings.Contains(bodies[1], "以下为最新信息") {
+		t.Fatalf("unexpected revision notification: title=%q body=%q", titles[1], bodies[1])
+	}
+}
+
+func TestHandlePayloadDoesNotSendRevisionAfterFailedInitialFanout(t *testing.T) {
+	var requests atomic.Int32
+	titles := make(chan string, 2)
+	bark := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse Bark request: %v", err)
+		}
+		titles <- r.Form.Get("title")
+		attempt := requests.Add(1)
+		if attempt == 1 {
+			http.Error(w, "device key not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
+	}))
+	defer bark.Close()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "subscriptions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(Subscription{
+		BarkID: "completionGateKey", BarkServer: bark.URL, Latitude: 30.6, Longitude: 104.1,
+		NotifyBands: []NotificationBand{{Min: 0, Max: notificationOpenEndedMax, Level: "active"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Bark:   BarkConfig{Server: bark.URL, SelfHostedServer: bark.URL, Group: "test", RequestTimeoutSeconds: 2},
+		Server: ServerConfig{AuditPath: filepath.Join(t.TempDir(), "audit")},
+		Alert: AlertConfig{
+			PushUpdates: true, SWaveKMS: 3.5, PWaveKMS: 6, StaleOriginSecond: 600,
+			SendRetryAttempts: 1, SendRetryDelayMS: 1,
+		},
+	}
+	notifier := NewNotifier(cfg.Bark, cfg.Alert)
+	deduper := NewDeduper(time.Hour)
+	cache := NewAlertCache(time.Hour, 10)
+	origin := time.Now().Add(30 * time.Second).Truncate(time.Second)
+	payload := func(report int, magnitude float64) []byte {
+		value, err := json.Marshal(map[string]any{
+			"type": "cenc_eew", "EventID": "failed-initial", "ReportNum": report,
+			"OriginTime": origin.Format(time.RFC3339), "HypoCenter": "四川成都",
+			"Latitude": 30.61, "Longitude": 104.11, "Magnitude": magnitude, "Depth": 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+
+	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload(1, 5.0), time.Now())
+	handlePayload(context.Background(), cfg, notifier, deduper, store, cache, payload(2, 5.4), time.Now().Add(time.Millisecond))
+	if requests.Load() != 2 {
+		t.Fatalf("Bark requests=%d want=2", requests.Load())
+	}
+	<-titles
+	secondTitle := <-titles
+	if strings.Contains(secondTitle, "修订") {
+		t.Fatalf("first successful notification was incorrectly labeled as a revision: %q", secondTitle)
 	}
 }
 

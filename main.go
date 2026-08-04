@@ -484,20 +484,25 @@ type Deduper struct {
 }
 
 type earthquakeState struct {
-	ID           string
-	FirstSeen    time.Time
-	LastSeen     time.Time
-	Latest       Event
-	LastPushed   Event
-	SourceEvents map[string]string
-	SourceLatest map[string]Event
+	ID                   string
+	FirstSeen            time.Time
+	LastSeen             time.Time
+	Latest               Event
+	LastPushed           Event
+	HasCompletedPush     bool
+	Dispatching          bool
+	NextDispatchToken    uint64
+	PendingDispatchToken uint64
+	SourceEvents         map[string]string
+	SourceLatest         map[string]Event
 }
 
 type earthquakeDispatchDecision struct {
-	Dispatch    bool
-	First       bool
-	CanonicalID string
-	Reasons     []string
+	Dispatch      bool
+	First         bool
+	CanonicalID   string
+	Reasons       []string
+	DispatchToken uint64
 }
 
 func main() {
@@ -4126,6 +4131,7 @@ func handlePayload(ctx context.Context, cfg Config, notifier *Notifier, deduper 
 	log.Printf("event received id=%s report=%d type=%s canonical=%s first=%t revision_fields=%s received_at=%s origin=%s subscriptions=%d",
 		event.EventID, event.ReportNum, event.Type, correlation.CanonicalID, correlation.First, strings.Join(correlation.Reasons, ","), formatBeijing(receivedAt, time.RFC3339Nano), formatBeijing(event.OriginTime, time.RFC3339), store.Count())
 	pushed, skipped, failed := dispatchEvent(ctx, cfg, notifier, store, alertCache, event, receivedAt)
+	deduper.CompleteDispatch(correlation, event, pushed > 0)
 	log.Printf("event id=%s report=%d type=%s fanout pushed=%d skipped=%d failed=%d total=%d",
 		event.EventID, event.ReportNum, event.Type, pushed, skipped, failed, store.Count())
 }
@@ -4349,6 +4355,15 @@ func pushNotificationID(event Event) string {
 	identity := strings.TrimSpace(event.CanonicalID)
 	if identity == "" {
 		identity = event.EventID + "|" + event.Type
+	}
+	// Bark updates an existing notification when another push reuses its ID.
+	// Revisions therefore need a distinct deterministic ID so the completed
+	// initial warning remains visible instead of being replaced.
+	if event.Revision {
+		identity += fmt.Sprintf("|revision|%s|%s|%d|%d|%.4f|%.4f|%.2f|%.2f|%s|%t",
+			normalizedEarthquakeSource(event.Type), strings.TrimSpace(event.EventID), event.ReportNum,
+			event.OriginTime.UnixMilli(), event.Latitude, event.Longitude, event.Magnitude, event.DepthKM,
+			strings.TrimSpace(event.MaxIntensity), event.Cancel)
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return "eew-" + hex.EncodeToString(sum[:8])
@@ -5991,12 +6006,6 @@ func formatAlert(event Event, d Decision, sub Subscription, displays ...Notifica
 		lines = append(lines, "[测试] 这是一条模拟预警，不是真实地震。")
 	case isHistoryTestEvent(event):
 		lines = append(lines, "[历史复现测试] 这是一条使用历史数据生成的测试通知，不是当前发生的地震。")
-	case event.Revision:
-		revisionFields := event.RevisionFields
-		if !display.ShowIntensity {
-			revisionFields = slicesWithout(revisionFields, "max_intensity")
-		}
-		lines = append(lines, "[修订] "+earthquakeRevisionLabel(revisionFields)+"发生显著变化，以下为最新信息。")
 	}
 	notifyLevel := notifyLevelForEvent(event, sub, d)
 	lines = append(lines,
@@ -6033,48 +6042,6 @@ func formatAlert(event Event, d Decision, sub Subscription, displays ...Notifica
 	lines = append(lines, magnitudeLine)
 	lines = append(lines, "发震: "+alertOriginTimeLabel(event))
 	return title, subtitle, strings.Join(lines, "\n")
-}
-
-func slicesWithout(values []string, excluded string) []string {
-	filtered := make([]string, 0, len(values))
-	for _, value := range values {
-		if value != excluded {
-			filtered = append(filtered, value)
-		}
-	}
-	return filtered
-}
-
-func earthquakeRevisionLabel(fields []string) string {
-	labels := make([]string, 0, len(fields))
-	seen := make(map[string]bool)
-	for _, field := range fields {
-		label := ""
-		switch field {
-		case "cancellation":
-			label = "取消状态"
-		case "origin_time":
-			label = "发震时间"
-		case "epicenter":
-			label = "震中位置"
-		case "magnitude":
-			label = "震级"
-		case "depth":
-			label = "震源深度"
-		case "max_intensity":
-			label = "最大烈度"
-		case "hypocenter":
-			label = "震中名称"
-		}
-		if label != "" && !seen[label] {
-			seen[label] = true
-			labels = append(labels, label)
-		}
-	}
-	if len(labels) == 0 {
-		return "地震信息"
-	}
-	return strings.Join(labels, "、")
 }
 
 func intensityDescription(rank int) string {
@@ -6552,25 +6519,36 @@ func (d *Deduper) Evaluate(event Event, cfg AlertConfig, receivedAt time.Time) (
 			FirstSeen:    receivedAt,
 			LastSeen:     receivedAt,
 			Latest:       event,
-			LastPushed:   event,
 			SourceEvents: map[string]string{sourceType: event.EventID},
 			SourceLatest: map[string]Event{sourceType: event},
 		}
 		d.states[canonicalID] = state
 		d.indexSourceEventLocked(event, canonicalID)
-		return event, earthquakeDispatchDecision{Dispatch: true, First: true, CanonicalID: canonicalID}
+		token := beginEarthquakeDispatchLocked(state)
+		return event, earthquakeDispatchDecision{Dispatch: true, First: true, CanonicalID: canonicalID, DispatchToken: token}
 	}
 
 	effective := mergeEarthquakeEvent(state.Latest, event)
 	effective.CanonicalID = state.ID
-	reasons := meaningfulEarthquakeRevision(state.LastPushed, effective, cfg)
 	sourceType := normalizedEarthquakeSource(event.Type)
 	state.LastSeen = receivedAt
 	state.Latest = effective
 	state.SourceEvents[sourceType] = event.EventID
 	state.SourceLatest[sourceType] = effective
 	d.indexSourceEventLocked(event, state.ID)
+	if state.Dispatching {
+		effective.Revision = false
+		effective.RevisionFields = nil
+		return effective, earthquakeDispatchDecision{CanonicalID: state.ID}
+	}
+	if !state.HasCompletedPush {
+		effective.Revision = false
+		effective.RevisionFields = nil
+		token := beginEarthquakeDispatchLocked(state)
+		return effective, earthquakeDispatchDecision{Dispatch: true, First: true, CanonicalID: state.ID, DispatchToken: token}
+	}
 
+	reasons := meaningfulEarthquakeRevision(state.LastPushed, effective, cfg)
 	dispatch := len(reasons) > 0 && (cfg.PushUpdates || state.LastPushed.Cancel != effective.Cancel)
 	if !dispatch {
 		effective.Revision = false
@@ -6579,8 +6557,43 @@ func (d *Deduper) Evaluate(event Event, cfg AlertConfig, receivedAt time.Time) (
 	}
 	effective.Revision = true
 	effective.RevisionFields = append([]string(nil), reasons...)
-	state.LastPushed = effective
-	return effective, earthquakeDispatchDecision{Dispatch: true, CanonicalID: state.ID, Reasons: reasons}
+	token := beginEarthquakeDispatchLocked(state)
+	return effective, earthquakeDispatchDecision{Dispatch: true, CanonicalID: state.ID, Reasons: reasons, DispatchToken: token}
+}
+
+func beginEarthquakeDispatchLocked(state *earthquakeState) uint64 {
+	state.NextDispatchToken++
+	if state.NextDispatchToken == 0 {
+		state.NextDispatchToken++
+	}
+	state.PendingDispatchToken = state.NextDispatchToken
+	state.Dispatching = true
+	return state.PendingDispatchToken
+}
+
+// CompleteDispatch commits the revision baseline only after the entire fanout
+// has returned and at least one subscriber actually received the warning.
+// Failed or fully filtered fanouts leave no revision baseline, so the next
+// eligible report is sent as an initial warning rather than a revision-only
+// notification.
+func (d *Deduper) CompleteDispatch(decision earthquakeDispatchDecision, event Event, delivered bool) {
+	if d == nil || !decision.Dispatch || decision.DispatchToken == 0 || decision.CanonicalID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state := d.states[decision.CanonicalID]
+	if state == nil || !state.Dispatching || state.PendingDispatchToken != decision.DispatchToken {
+		return
+	}
+	state.Dispatching = false
+	state.PendingDispatchToken = 0
+	if !delivered {
+		return
+	}
+	event.CanonicalID = decision.CanonicalID
+	state.LastPushed = event
+	state.HasCompletedPush = true
 }
 
 func (d *Deduper) cleanupLocked(now time.Time) {

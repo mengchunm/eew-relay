@@ -68,7 +68,7 @@ func TestFormatAlertRespectsIndependentDisplaySettings(t *testing.T) {
 			t.Fatalf("both settings disabled but output contains %q: %s", hidden, combined)
 		}
 	}
-	if !strings.Contains(body, "[修订] 震级发生显著变化") || !strings.Contains(subtitle, "M5.2") {
+	if !strings.Contains(title, "地震警报修订") || strings.Contains(body, "[修订]") || !strings.Contains(subtitle, "M5.2") {
 		t.Fatalf("essential earthquake information missing: title=%q subtitle=%q body=%q", title, subtitle, body)
 	}
 
