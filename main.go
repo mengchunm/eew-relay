@@ -61,6 +61,8 @@ type QueueConfig struct {
 	Stream                string `yaml:"stream"`
 	Subject               string `yaml:"subject"`
 	Durable               string `yaml:"durable"`
+	WorkerID              string `yaml:"worker_id"`
+	NodeID                string `yaml:"node_id"`
 	ExpectedWorkers       int    `yaml:"expected_workers"`
 	WorkerHeartbeatSecond int    `yaml:"worker_heartbeat_seconds"`
 	BatchSize             int    `yaml:"batch_size"`
@@ -971,6 +973,12 @@ func applyQueueEnvironment(cfg *QueueConfig) {
 	}
 	if value := strings.TrimSpace(os.Getenv("EEW_NATS_TOKEN")); value != "" {
 		cfg.Token = value
+	}
+	if value := strings.TrimSpace(os.Getenv("EEW_QUEUE_WORKER_ID")); value != "" {
+		cfg.WorkerID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("EEW_QUEUE_NODE_ID")); value != "" {
+		cfg.NodeID = value
 	}
 	applyRelayEnvInt("EEW_QUEUE_BATCH_SIZE", &cfg.BatchSize)
 	applyRelayEnvInt("EEW_QUEUE_MAX_INFLIGHT_BATCHES", &cfg.MaxInflightBatches)

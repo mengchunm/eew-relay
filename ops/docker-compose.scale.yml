@@ -134,6 +134,8 @@ services:
       TZ: Asia/Shanghai
       EEW_NATS_URL: nats://eew-nats:4222
       EEW_BARK_DEVICE_DSN: bark:${MYSQL_PASSWORD}@tcp(bark-mysql:3306)/bark
+      EEW_QUEUE_WORKER_ID: push-worker-a
+      EEW_QUEUE_NODE_ID: ${EEW_QUEUE_NODE_ID:-eew-node-1}
     volumes:
       - ${EEW_CONFIG_PATH:-../config.yaml}:/app/config.yaml:ro
     networks: [eew]
@@ -152,6 +154,8 @@ services:
   push-worker-b:
     extends: push-worker-a
     container_name: eew-push-worker-b
+    environment:
+      EEW_QUEUE_WORKER_ID: push-worker-b
 
 networks:
   eew:

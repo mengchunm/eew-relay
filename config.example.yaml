@@ -144,6 +144,11 @@ queue:
   stream: "EEW_PUSH"
   subject: "eew.push.task"
   durable: "eew-push-workers"
+  # Set unique, stable values per worker and per physical/virtual host. For
+  # containers these are best injected with EEW_QUEUE_WORKER_ID and
+  # EEW_QUEUE_NODE_ID so one shared config can serve many nodes and workers.
+  worker_id: ""
+  node_id: ""
   # Used by the read-only admin service monitor. Workers publish operational
   # heartbeats over NATS; no Bark notification is sent by this check.
   expected_workers: 2

@@ -32,14 +32,16 @@ import (
 const adminSessionCookie = "eew_admin_session"
 
 var adminProcessStartedAt = time.Now()
+var adminWorkerActionAuditMu sync.Mutex
 
 type adminAuth struct {
-	username     string
-	password     string
-	sessionTTL   time.Duration
-	signingKey   [32]byte
-	loginLimiter *clientRateLimiter
-	testLimiter  *clientRateLimiter
+	username       string
+	password       string
+	sessionTTL     time.Duration
+	signingKey     [32]byte
+	loginLimiter   *clientRateLimiter
+	testLimiter    *clientRateLimiter
+	controlLimiter *clientRateLimiter
 }
 
 type adminSessionClaims struct {
@@ -205,6 +207,23 @@ type adminTestRequest struct {
 	Kind   string `json:"kind"`
 }
 
+type adminWorkerControlRequest struct {
+	InstanceID string `json:"instance_id"`
+	Action     string `json:"action"`
+}
+
+type adminWorkerActionAuditRecord struct {
+	RecordedAt string `json:"recorded_at"`
+	Username   string `json:"username"`
+	ClientIP   string `json:"client_ip"`
+	InstanceID string `json:"instance_id"`
+	Action     string `json:"action"`
+	Accepted   bool   `json:"accepted"`
+	State      string `json:"state,omitempty"`
+	Inflight   int64  `json:"inflight,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 type adminSubscriptionLivenessResult struct {
 	BarkID     string `json:"bark_id"`
 	BarkServer string `json:"bark_server"`
@@ -231,11 +250,12 @@ func newAdminAuth(cfg ServerConfig) *adminAuth {
 		ttl = 24 * time.Hour
 	}
 	auth := &adminAuth{
-		username:     username,
-		password:     password,
-		sessionTTL:   ttl,
-		loginLimiter: newClientRateLimiter(10, 5),
-		testLimiter:  newClientRateLimiter(12, 4),
+		username:       username,
+		password:       password,
+		sessionTTL:     ttl,
+		loginLimiter:   newClientRateLimiter(10, 5),
+		testLimiter:    newClientRateLimiter(12, 4),
+		controlLimiter: newClientRateLimiter(20, 5),
 	}
 	auth.signingKey = sha256.Sum256([]byte("eew-admin-session-v1\x00" + username + "\x00" + password))
 	return auth
@@ -327,6 +347,28 @@ func setAdminSessionCookie(w http.ResponseWriter, r *http.Request, value string,
 		Secure:   requestUsesHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+func writeAdminWorkerActionAudit(cfg Config, record adminWorkerActionAuditRecord) error {
+	directory := strings.TrimSpace(cfg.Server.AuditPath)
+	if directory == "" {
+		directory = filepath.Join(filepath.Dir(cfg.Server.DataPath), "audit")
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	adminWorkerActionAuditMu.Lock()
+	defer adminWorkerActionAuditMu.Unlock()
+	path := filepath.Join(directory, "admin-worker-actions.jsonl")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCache *AlertCache, notifier *Notifier, health *RuntimeHealth, serviceMonitor *adminServiceMonitor) {
@@ -443,6 +485,62 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 			return
 		}
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: data})
+	}))
+	mux.HandleFunc("GET /api/admin/workers", auth.require(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: buildAdminWorkerManagement(notifier)})
+	}))
+	mux.HandleFunc("POST /api/admin/workers/control", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !auth.controlLimiter.Allow(clientIP(r), time.Now()) {
+			w.Header().Set("Retry-After", "60")
+			writeJSON(w, http.StatusTooManyRequests, APIResponse{Success: false, Message: "Worker 操作过于频繁，请稍后再试"})
+			return
+		}
+		var request adminWorkerControlRequest
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Worker 控制请求格式错误"})
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Worker 控制请求只能包含一个 JSON 对象"})
+			return
+		}
+		if notifier == nil || notifier.queue == nil {
+			writeJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Message: "当前未启用 NATS Worker"})
+			return
+		}
+		controlCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		response, err := notifier.queue.controlWorker(controlCtx, request.InstanceID, request.Action)
+		auditRecord := adminWorkerActionAuditRecord{RecordedAt: time.Now().UTC().Format(time.RFC3339Nano), Username: auth.username, ClientIP: clientIP(r), InstanceID: strings.TrimSpace(request.InstanceID), Action: strings.ToLower(strings.TrimSpace(request.Action)), Accepted: err == nil, State: response.State, Inflight: response.Inflight}
+		if err != nil {
+			auditRecord.Error = err.Error()
+			if auditErr := writeAdminWorkerActionAudit(cfg, auditRecord); auditErr != nil {
+				log.Printf("write admin worker action audit: %v", auditErr)
+			}
+			status := http.StatusBadGateway
+			message := "Worker 控制失败：" + err.Error()
+			switch {
+			case errors.Is(err, errLastRunningWorker):
+				status = http.StatusConflict
+				message = "至少需要保留一个运行中的 Worker；请先恢复其他 Worker"
+			case errors.Is(err, errQueueWorkerUnavailable):
+				status = http.StatusNotFound
+			case errors.Is(err, errQueueWorkerUnsupported):
+				status = http.StatusConflict
+			}
+			log.Printf("admin worker control action=%s instance=%s accepted=false ip=%s error=%v", strings.TrimSpace(request.Action), strings.TrimSpace(request.InstanceID), clientIP(r), err)
+			writeJSON(w, status, APIResponse{Success: false, Message: message, Data: response})
+			return
+		}
+		if auditErr := writeAdminWorkerActionAudit(cfg, auditRecord); auditErr != nil {
+			log.Printf("write admin worker action audit: %v", auditErr)
+		}
+		log.Printf("admin worker control action=%s instance=%s accepted=true state=%s inflight=%d ip=%s", strings.TrimSpace(request.Action), strings.TrimSpace(request.InstanceID), response.State, response.Inflight, clientIP(r))
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "Worker 操作已接受", Data: map[string]any{"result": response, "workers": buildAdminWorkerManagement(notifier)}})
 	}))
 	mux.HandleFunc("GET /api/admin/subscriptions", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		serveAdminSubscriptions(w, r, cfg, store)
@@ -1077,6 +1175,65 @@ func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier 
 		"self_hosted_bark_server":    strings.TrimRight(strings.TrimSpace(cfg.Bark.SelfHostedServer), "/"),
 		"checks":                     checks,
 	}
+}
+
+func buildAdminWorkerManagement(notifier *Notifier) map[string]any {
+	now := time.Now()
+	data := map[string]any{
+		"enabled": false, "connected": false, "checked_at": now.UTC().Format(time.RFC3339),
+		"expected": 0, "active": 0, "running": 0, "draining": 0, "paused": 0, "offline": 0,
+		"workers": []queueWorkerHealth{}, "queue_messages": uint64(0), "queue_bytes": uint64(0),
+	}
+	if notifier == nil || notifier.queue == nil {
+		return data
+	}
+	queue := notifier.queue
+	data["enabled"] = true
+	data["connected"] = queue.nc != nil && queue.nc.IsConnected()
+	workers, expected, staleAfter := queue.workerHealth(now)
+	active := 0
+	running := 0
+	draining := 0
+	paused := 0
+	offline := 0
+	nodes := make(map[string]int)
+	for _, worker := range workers {
+		nodes[worker.NodeID]++
+		if !worker.Active {
+			offline++
+			continue
+		}
+		active++
+		switch worker.State {
+		case "paused":
+			paused++
+		case "draining":
+			draining++
+		default:
+			running++
+		}
+	}
+	data["expected"] = expected
+	data["active"] = active
+	data["running"] = running
+	data["draining"] = draining
+	data["paused"] = paused
+	data["offline"] = offline
+	data["node_count"] = len(nodes)
+	data["stale_after_seconds"] = int64(staleAfter.Seconds())
+	data["workers"] = workers
+	if queue.js != nil {
+		if info, err := queue.js.StreamInfo(queue.cfg.Stream); err == nil && info != nil {
+			data["queue_messages"] = info.State.Msgs
+			data["queue_bytes"] = info.State.Bytes
+			if !info.State.FirstTime.IsZero() {
+				data["oldest_message_at"] = info.State.FirstTime.UTC().Format(time.RFC3339)
+			}
+		} else if err != nil {
+			data["queue_error"] = err.Error()
+		}
+	}
+	return data
 }
 
 func newAdminServiceMonitor(cfg Config, store *Store, notifier *Notifier, health *RuntimeHealth) *adminServiceMonitor {

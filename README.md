@@ -158,6 +158,7 @@ EEW_ADMIN_PASSWORD=replace_with_a_long_unique_password
 - 只向指定的单个已订阅 Bark Key 发送链路或模拟地震测试；
 - 查看 Wolfx 数据源、订阅存储、NATS 推送队列、审计目录和进程资源状态。
 - 在独立“服务监控”页面按时间轴查看应用、Wolfx、PostgreSQL、NATS/JetStream、推送 Worker、官方/自建 Bark、Bark 设备数据库和审计存储状态。服务器每分钟采样一次，历史写入数据目录下的 `service-health.jsonl`，保留 30 天并支持最近 24 小时、7 天和 30 天视图；健康探测只使用连接检查、`/ping` 与 Worker 心跳，不发送通知。
+- 在独立“Worker 管理”页面按节点查看任意数量的本机或远程 Worker，包括在线状态、运行/排空/暂停状态、并发、处理中批次、累计目标与失败数；管理员可通过 NATS 定向暂停、排空并暂停或恢复单个 Worker。控制面不会挂载 Docker Socket、不会停止容器或删除 JetStream 任务，并拒绝暂停最后一个运行中的 Worker；每次操作追加记录到审计目录的 `admin-worker-actions.jsonl`。
 - 在“系统概览”中分别开关新生成通知的烈度信息和预估到达时间。开关同时作用于 Bark 标题/正文及通知详情网页，不改变烈度计算、订阅筛选或推送判定；详情页会保留通知生成时的设置，历史通知不回溯修改。设置持久化到数据目录下的 `notification-display.json`，默认两项均显示。
 
 管理员批量新增不受公开订阅暂停开关影响，但仍执行 Bark Key、服务器、地点和通知规则校验。后台不会提供无确认的全用户群发按钮；原有 `POST /api/admin/simulate` 继续使用独立 `simulate_token`，只用于受控的全局模拟。
@@ -285,7 +286,7 @@ Bark 官方服务器正常使用没有固定次数限制，但异常使用会触
 
 扩展架构支持四部分：PostgreSQL 保存全部订阅和监测地点；NATS JetStream 保存短时推送任务并由多个 `-queue-worker` 竞争消费；Bark 设备注册可迁移到 MySQL；可选中继可按 Bark Key 稳定哈希承担受控比例的突发流量。每场地震都会评估全部订阅，不设置最大通知距离；是否通知仍由订阅地预估烈度和用户通知档位决定。旧配置中的 `alert.max_distance_km` 只为严格配置解析兼容而保留，运行时不再生效。任务 ACK 只在 worker 完成逐目标临时错误重试并返回最终批次结果后提交，通知 ID 由事件确定性生成，用于降低重投造成重复通知的概率。
 
-队列 Worker 每隔 `queue.worker_heartbeat_seconds` 秒向独立的 NATS 核心主题发布一次只包含实例 ID、启动时间、并发数和累计处理量的心跳。管理员服务监控按 `queue.expected_workers` 判断缺失或过期心跳；心跳不进入 JetStream 任务流、不包含 Bark Key，也不会触发推送。项目提供的双 Worker Compose 建议配置：
+队列 Worker 每隔 `queue.worker_heartbeat_seconds` 秒向独立的 NATS 核心主题发布一次只包含 Worker ID、启动实例 ID、节点 ID、运行状态、处理中数量、启动时间、并发数和累计处理量的心跳。管理员服务监控按 `queue.expected_workers` 判断缺失或过期心跳；心跳不进入 JetStream 任务流、不包含 Bark Key，也不会触发推送。`EEW_QUEUE_NODE_ID` 应在每台物理机或虚拟机上设置唯一稳定值，`EEW_QUEUE_WORKER_ID` 应在同一节点内保持唯一；未设置时会回退到主机名。项目提供的双 Worker Compose 建议配置：
 
 ```yaml
 queue:

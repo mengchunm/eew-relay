@@ -65,6 +65,11 @@ func TestAdminLoginUsesSignedHTTPOnlySession(t *testing.T) {
 	if unauthorizedServices.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized services status=%d body=%s", unauthorizedServices.Code, unauthorizedServices.Body.String())
 	}
+	unauthorizedWorkers := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedWorkers, httptest.NewRequest(http.MethodGet, "/api/admin/workers", nil))
+	if unauthorizedWorkers.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized workers status=%d body=%s", unauthorizedWorkers.Code, unauthorizedWorkers.Body.String())
+	}
 	unauthorizedHistory := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorizedHistory, httptest.NewRequest(http.MethodGet, "/api/admin/services/history", nil))
 	if unauthorizedHistory.Code != http.StatusUnauthorized {
@@ -137,14 +142,25 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="key-history-dialog"`,
 		`id="open-key-history"`,
 		`data-close="key-history-dialog"`,
+		`class="responsive-table"`,
+		`function labelResponsiveTable(table)`,
+		`@media(max-width:430px)`,
+		`class="audit-mobile-toggle audit-toggle"`,
+		`class="responsive-table subscriptions-table"`,
+		`#subscriptions-body td[data-label="选择"]`,
 		`class="btn btn-secondary btn-sm sub-history"`,
 		`/api/admin/subscription-audits/search`,
 		`首轮全量`,
-		`class="audit-table"`,
+		`class="audit-table responsive-table"`,
 		`data-audit-sort="status"`,
 		`id="audit-records-prev"`,
 		`id="audit-records-next"`,
 		`data-view="services"`,
+		`data-view="workers"`,
+		`id="view-workers"`,
+		`id="worker-nodes"`,
+		`/api/admin/workers`,
+		`/api/admin/workers/control`,
 		`id="service-history-range"`,
 		`id="service-history-chart"`,
 		`/api/admin/services`,
@@ -164,6 +180,49 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 	}
 	if strings.Contains(body, `class="panel key-history-panel"`) {
 		t.Fatalf("subscription notification history must use a dialog instead of occupying the audit view")
+	}
+	if strings.Contains(body, `.table-wrap{overflow:auto`) {
+		t.Fatalf("admin tables must not require horizontal scrolling")
+	}
+}
+
+func TestAdminWorkerManagementDisabledWithoutQueue(t *testing.T) {
+	cfg := adminTestConfig(t)
+	handler, _, _ := adminTestHandler(t, cfg)
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, adminRequest(http.MethodGet, "/api/admin/workers", nil, cfg))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"enabled":false`) || !strings.Contains(list.Body.String(), `"workers":[]`) {
+		t.Fatalf("disabled workers status=%d body=%s", list.Code, list.Body.String())
+	}
+	control := httptest.NewRecorder()
+	handler.ServeHTTP(control, adminRequest(http.MethodPost, "/api/admin/workers/control", []byte(`{"instance_id":"demo","action":"pause"}`), cfg))
+	if control.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled worker control status=%d body=%s", control.Code, control.Body.String())
+	}
+}
+
+func TestAdminWorkerManagementGroupsMultipleNodes(t *testing.T) {
+	now := time.Now()
+	client := &PushQueueClient{cfg: QueueConfig{ExpectedWorkers: 3, WorkerHeartbeatSecond: 5}, workers: map[string]queueWorkerObservation{
+		"instance-a": {Heartbeat: queueWorkerHeartbeat{ID: "worker-a", InstanceID: "instance-a", NodeID: "node-east", State: "running", ControlVersion: 1}, Received: now},
+		"instance-b": {Heartbeat: queueWorkerHeartbeat{ID: "worker-b", InstanceID: "instance-b", NodeID: "node-east", State: "paused", ControlVersion: 1}, Received: now},
+		"instance-c": {Heartbeat: queueWorkerHeartbeat{ID: "worker-c", InstanceID: "instance-c", NodeID: "node-west", State: "draining", ControlVersion: 1, Inflight: 2}, Received: now},
+	}}
+	data := buildAdminWorkerManagement(&Notifier{queue: client})
+	if data["node_count"] != 2 || data["active"] != 3 || data["running"] != 1 || data["paused"] != 1 || data["draining"] != 1 {
+		t.Fatalf("unexpected worker management data: %#v", data)
+	}
+}
+
+func TestAdminWorkerActionsUseDedicatedAuditLog(t *testing.T) {
+	cfg := adminTestConfig(t)
+	record := adminWorkerActionAuditRecord{RecordedAt: time.Now().UTC().Format(time.RFC3339Nano), Username: "saevio", ClientIP: "192.0.2.1", InstanceID: "instance-a", Action: "drain", Accepted: true, State: "draining", Inflight: 2}
+	if err := writeAdminWorkerActionAudit(cfg, record); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.Server.AuditPath, "admin-worker-actions.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"instance_id":"instance-a"`) || !strings.Contains(string(data), `"action":"drain"`) {
+		t.Fatalf("worker audit err=%v body=%s", err, data)
 	}
 }
 
