@@ -19,3 +19,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 ## Map and geocoding data
 
 The default map tiles contain OpenStreetMap data and are served through CARTO. The web interface displays attribution for both providers. Operators are responsible for complying with the providers' current usage and licensing terms, or replacing those services for their deployment.
+
+## GeoSCK 2026 site-condition data
+
+The embedded one-arc-minute Vs30 grid is a runtime-optimized derivative of the GeoSCK 2026 mainland-China map by Jian Zhou, Yufang Rong, Li Li, Yefei Ren, and Xin Tian, distributed under CC BY 4.0. Source, paper, license, and transformation details are recorded in [`site_data/ATTRIBUTION.md`](site_data/ATTRIBUTION.md).

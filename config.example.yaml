@@ -93,6 +93,14 @@ alert:
   p_wave_km_s: 6.0
   stale_origin_seconds: 600
   dedup_keep_minutes: 120
+  # Lightweight mainland-China intensity model trained offline from the
+  # National Earthquake Science Data Center ground-motion dataset.
+  # legacy: old formula only; shadow: record the candidate without changing
+  # delivery; active: use the bounded candidate and stable-formula fallback.
+  intensity_model_mode: "shadow"
+  # The learned model can never move farther than this from the stable physical
+  # attenuation baseline. Values above 2.0 are rejected during startup.
+  intensity_model_max_correction: 0.8
   # Official api.day.app fanout. Keep this conservative because official Bark
   # rejects excessive concurrent TCP connections and bans abnormal error bursts.
   fanout_concurrency: 300

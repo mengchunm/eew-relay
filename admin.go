@@ -468,6 +468,47 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 		log.Printf("admin notification display updated intensity=%t estimated_time=%t ip=%s", settings.ShowIntensity, settings.ShowEstimatedTime, clientIP(r))
 		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "设置已保存", Data: settings})
 	}))
+	mux.HandleFunc("GET /api/admin/intensity-model", auth.require(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "ok", Data: intensityModelSettings(cfg)})
+	}))
+	mux.HandleFunc("PUT /api/admin/intensity-model", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		var request struct {
+			Mode string `json:"mode"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "请提供有效的烈度算法模式"})
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "请求只能包含一份算法设置"})
+			return
+		}
+		mode, err := validateIntensityModelMode(request.Mode)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "算法模式仅支持 legacy、shadow 或 active"})
+			return
+		}
+		if cfg.intensityModelModeOverride != "" {
+			writeJSON(w, http.StatusConflict, APIResponse{Success: false, Message: "服务器环境变量正在强制算法模式，请先移除 EEW_INTENSITY_MODEL_MODE 并重启服务"})
+			return
+		}
+		if cfg.intensityModelSettings == nil {
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "烈度算法设置尚未初始化"})
+			return
+		}
+		settings, err := cfg.intensityModelSettings.Update(mode, time.Now())
+		if err != nil {
+			log.Printf("update intensity model settings: %v", err)
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "保存烈度算法设置失败"})
+			return
+		}
+		log.Printf("admin intensity model updated mode=%s version=%s ip=%s", settings.Mode, settings.ModelVersion, clientIP(r))
+		writeJSON(w, http.StatusOK, APIResponse{Success: true, Message: "算法设置已保存", Data: settings})
+	}))
 	mux.HandleFunc("GET /api/admin/services", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		data := serviceMonitor.Snapshot(r.Context())

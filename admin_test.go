@@ -173,6 +173,11 @@ func TestAdminPageNeverEmbedsConfiguredCredentials(t *testing.T) {
 		`id="show-notification-intensity"`,
 		`id="show-notification-time"`,
 		`/api/admin/notification-display`,
+		`id="intensity-model-options"`,
+		`name="intensity-model-mode"`,
+		`/api/admin/intensity-model`,
+		`受限场地修正`,
+		`场地修正 ${siteDelta`,
 		`最近 30 天`,
 		`不发送任何通知`,
 	} {
@@ -287,6 +292,61 @@ func TestAdminNotificationDisplaySettingsAPI(t *testing.T) {
 	handler.ServeHTTP(invalid, adminRequest(http.MethodPut, "/api/admin/notification-display", []byte(`{"show_intensity":true}`), cfg))
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("incomplete update status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestAdminIntensityModelSettingsAPI(t *testing.T) {
+	cfg := adminTestConfig(t)
+	cfg.Alert.IntensityModelMode = intensityModelModeShadow
+	cfg.Alert.IntensityModelMaxCorrection = defaultModelCorrection
+	handler, _, _ := adminTestHandler(t, cfg)
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/admin/intensity-model", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, adminRequest(http.MethodGet, "/api/admin/intensity-model", nil, cfg))
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"mode":"shadow"`) || !strings.Contains(get.Body.String(), `"model_version":`) {
+		t.Fatalf("default model settings status=%d body=%s", get.Code, get.Body.String())
+	}
+
+	update := httptest.NewRecorder()
+	handler.ServeHTTP(update, adminRequest(http.MethodPut, "/api/admin/intensity-model", []byte(`{"mode":"active"}`), cfg))
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"mode":"active"`) {
+		t.Fatalf("update model settings status=%d body=%s", update.Code, update.Body.String())
+	}
+	reopened, err := newIntensityModelSettingsStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings := reopened.Snapshot(); settings.Mode != intensityModelModeActive || settings.UpdatedAt == "" {
+		t.Fatalf("model settings were not persisted: %#v", settings)
+	}
+
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, adminRequest(http.MethodPut, "/api/admin/intensity-model", []byte(`{"mode":"unsafe"}`), cfg))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid model mode status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestAdminIntensityModelRejectsChangesWhenEnvironmentForcesMode(t *testing.T) {
+	cfg := adminTestConfig(t)
+	cfg.intensityModelModeOverride = intensityModelModeLegacy
+	handler, _, _ := adminTestHandler(t, cfg)
+
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, adminRequest(http.MethodGet, "/api/admin/intensity-model", nil, cfg))
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"mode":"legacy"`) || !strings.Contains(get.Body.String(), `"forced":true`) {
+		t.Fatalf("forced model status=%d body=%s", get.Code, get.Body.String())
+	}
+	update := httptest.NewRecorder()
+	handler.ServeHTTP(update, adminRequest(http.MethodPut, "/api/admin/intensity-model", []byte(`{"mode":"active"}`), cfg))
+	if update.Code != http.StatusConflict {
+		t.Fatalf("forced model update status=%d body=%s", update.Code, update.Body.String())
 	}
 }
 
