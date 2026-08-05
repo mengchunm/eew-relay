@@ -53,28 +53,40 @@ func barkMySQLPool(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-func selfHostedBarkDevicesMySQL(dsn string) (map[string]bool, error) {
+func selfHostedBarkDevicesMySQL(dsn string) (selfHostedBarkDeviceIndex, error) {
 	db, err := barkMySQLPool(dsn)
 	if err != nil {
-		return nil, err
+		return selfHostedBarkDeviceIndex{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	var collation string
+	if err := db.QueryRowContext(ctx, `
+		SELECT COLLATION_NAME
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'key'
+		LIMIT 1`).Scan(&collation); err != nil {
+		return selfHostedBarkDeviceIndex{}, fmt.Errorf("read Bark devices.key collation: %w", err)
+	}
+	caseInsensitive := strings.HasSuffix(strings.ToLower(strings.TrimSpace(collation)), "_ci")
 	rows, err := db.QueryContext(ctx, `SELECT `+"`key`"+`, token FROM devices`)
 	if err != nil {
-		return nil, err
+		return selfHostedBarkDeviceIndex{}, err
 	}
 	defer rows.Close()
 	devices := make(map[string]bool)
 	for rows.Next() {
 		var key, token string
 		if err := rows.Scan(&key, &token); err != nil {
-			return nil, err
+			return selfHostedBarkDeviceIndex{}, err
 		}
-		key = strings.TrimSpace(key)
+		key = normalizeBarkDeviceKey(key, caseInsensitive)
 		if key != "" {
 			devices[key] = strings.TrimSpace(token) != ""
 		}
 	}
-	return devices, rows.Err()
+	if err := rows.Err(); err != nil {
+		return selfHostedBarkDeviceIndex{}, err
+	}
+	return selfHostedBarkDeviceIndex{devices: devices, caseInsensitive: caseInsensitive}, nil
 }

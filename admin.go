@@ -946,7 +946,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 			selfHostedTotal++
 		}
 	}
-	devices := map[string]bool{}
+	devices := selfHostedBarkDeviceIndex{devices: map[string]bool{}}
 	if selfHostedTotal > 0 {
 		var err error
 		devices, err = loadSelfHostedBarkDevices(cfg)
@@ -993,7 +993,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 			continue
 		}
 		if isSelfHostedBarkServer(sub.BarkServer, cfg) {
-			usable, exists := devices[sub.BarkID]
+			usable, exists := devices.lookup(sub.BarkID)
 			if exists && usable {
 				selfHostedAlive++
 				appendResult(sub, subscriptionLivenessDevicePresent, "自建 Bark 设备库中存在该 Key，且设备 Token 有效")
@@ -1033,7 +1033,7 @@ func serveAdminSubscriptionLiveness(w http.ResponseWriter, r *http.Request, cfg 
 		"self_hosted_token_missing":  selfHostedTokenMissing,
 		"official_not_checked":       officialNotChecked,
 		"invalid_subscriptions":      invalid,
-		"device_keys":                len(devices),
+		"device_keys":                len(devices.devices),
 		"status_counts":              statusCounts,
 		"result_total":               len(results),
 		"results":                    results,
@@ -1073,17 +1073,35 @@ func adminLivenessSubscriptions(cfg Config, subscriptions []Subscription, reques
 	return selected, "selected", notFound
 }
 
-func loadSelfHostedBarkDevices(cfg Config) (map[string]bool, error) {
+type selfHostedBarkDeviceIndex struct {
+	devices         map[string]bool
+	caseInsensitive bool
+}
+
+func normalizeBarkDeviceKey(key string, caseInsensitive bool) string {
+	key = strings.TrimSpace(key)
+	if caseInsensitive {
+		return strings.ToLower(key)
+	}
+	return key
+}
+
+func (index selfHostedBarkDeviceIndex) lookup(key string) (bool, bool) {
+	usable, exists := index.devices[normalizeBarkDeviceKey(key, index.caseInsensitive)]
+	return usable, exists
+}
+
+func loadSelfHostedBarkDevices(cfg Config) (selfHostedBarkDeviceIndex, error) {
 	if dsn := strings.TrimSpace(cfg.Bark.DeviceDBDSN); dsn != "" {
 		return selfHostedBarkDevicesMySQL(dsn)
 	}
 	path := strings.TrimSpace(cfg.Bark.DeviceDBPath)
 	if path == "" {
-		return nil, errors.New("bark device db path is empty")
+		return selfHostedBarkDeviceIndex{}, errors.New("bark device db path is empty")
 	}
 	db, cleanup, err := openBarkDeviceDB(path)
 	if err != nil {
-		return nil, err
+		return selfHostedBarkDeviceIndex{}, err
 	}
 	defer cleanup()
 	defer db.Close()
@@ -1101,9 +1119,9 @@ func loadSelfHostedBarkDevices(cfg Config) (map[string]bool, error) {
 		})
 	})
 	if err != nil {
-		return nil, err
+		return selfHostedBarkDeviceIndex{}, err
 	}
-	return devices, nil
+	return selfHostedBarkDeviceIndex{devices: devices}, nil
 }
 
 func buildAdminOverview(ctx context.Context, cfg Config, store *Store, notifier *Notifier, health *RuntimeHealth) map[string]any {
