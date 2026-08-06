@@ -326,6 +326,13 @@ func TestAdminIntensityModelSettingsAPI(t *testing.T) {
 		t.Fatalf("model settings were not persisted: %#v", settings)
 	}
 
+	gbt := httptest.NewRecorder()
+	handler.ServeHTTP(gbt, adminRequest(http.MethodPut, "/api/admin/intensity-model", []byte(`{"mode":"gbt2020"}`), cfg))
+	if gbt.Code != http.StatusOK || !strings.Contains(gbt.Body.String(), `"mode":"gbt2020"`) ||
+		!strings.Contains(gbt.Body.String(), `"standard_name":"GB/T 17742-2020"`) {
+		t.Fatalf("update GBT model settings status=%d body=%s", gbt.Code, gbt.Body.String())
+	}
+
 	invalid := httptest.NewRecorder()
 	handler.ServeHTTP(invalid, adminRequest(http.MethodPut, "/api/admin/intensity-model", []byte(`{"mode":"unsafe"}`), cfg))
 	if invalid.Code != http.StatusBadRequest {

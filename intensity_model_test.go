@@ -82,26 +82,45 @@ func TestSiteCorrectionRejectsLowConfidenceAndHardRockIsNegative(t *testing.T) {
 }
 
 func TestIntensityModelMonotonicSafetyConstraints(t *testing.T) {
-	cfg := Config{Alert: AlertConfig{IntensityModelMode: "active"}}
-	event := Event{Type: "cenc_eew", Magnitude: 4, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
-	previous := -1.0
-	for magnitude := 4.0; magnitude <= 8.0001; magnitude += 0.1 {
-		event.Magnitude = magnitude
-		current := predictIntensity(cfg, event, 80, math.Sqrt(80*80+100), SiteCondition{}).Selected
-		if current+1e-9 < previous {
-			t.Fatalf("intensity decreased as magnitude increased: M%.1f=%.1f previous=%.1f", magnitude, current, previous)
-		}
-		previous = current
-	}
+	for _, mode := range []string{intensityModelModeActive, intensityModelModeHybrid} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := Config{Alert: AlertConfig{IntensityModelMode: mode}}
+			event := Event{Type: "cenc_eew", Magnitude: 4, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
+			previous := -1.0
+			for magnitude := 4.0; magnitude <= 8.0001; magnitude += 0.1 {
+				event.Magnitude = magnitude
+				current := predictIntensity(cfg, event, 80, math.Sqrt(80*80+100), SiteCondition{}).Selected
+				if current+1e-9 < previous {
+					t.Fatalf("intensity decreased as magnitude increased: M%.1f=%.1f previous=%.1f", magnitude, current, previous)
+				}
+				previous = current
+			}
 
-	event.Magnitude = 6.0
-	previous = math.MaxFloat64
+			event.Magnitude = 6.0
+			previous = math.MaxFloat64
+			for distance := 0.0; distance <= 700; distance += 5 {
+				current := predictIntensity(cfg, event, distance, math.Sqrt(distance*distance+100), SiteCondition{}).Selected
+				if current > previous+1e-9 {
+					t.Fatalf("intensity increased as distance increased: D%.0f=%.1f previous=%.1f", distance, current, previous)
+				}
+				previous = current
+			}
+		})
+	}
+}
+
+func TestGBTGroundMotionHeadsAreMonotonicWithDistance(t *testing.T) {
+	event := Event{Type: "cenc_eew", Magnitude: 6, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
+	previousPGA, previousPGV := math.MaxFloat64, math.MaxFloat64
 	for distance := 0.0; distance <= 700; distance += 5 {
-		current := predictIntensity(cfg, event, distance, math.Sqrt(distance*distance+100), SiteCondition{}).Selected
-		if current > previous+1e-9 {
-			t.Fatalf("intensity increased as distance increased: D%.0f=%.1f previous=%.1f", distance, current, previous)
+		_, _, pga, pgv, reason := gbtIntensityModel(event, distance)
+		if reason != "" {
+			t.Fatalf("unexpected fallback at D%.0f: %s", distance, reason)
 		}
-		previous = current
+		if pga > previousPGA+1e-12 || pgv > previousPGV+1e-12 {
+			t.Fatalf("ground motion increased at D%.0f: PGA %.6f->%.6f PGV %.6f->%.6f", distance, previousPGA, pga, previousPGV, pgv)
+		}
+		previousPGA, previousPGV = pga, pgv
 	}
 }
 
@@ -111,6 +130,60 @@ func TestGeneratedIntensityModelMetadata(t *testing.T) {
 	}
 	if len(officialIntensityModelRoots) != 63 || len(officialIntensityModelNodes) < 1000 {
 		t.Fatalf("unexpected generated model size roots=%d nodes=%d", len(officialIntensityModelRoots), len(officialIntensityModelNodes))
+	}
+}
+
+func TestGBTInstrumentalIntensityMatchesStandardBoundaries(t *testing.T) {
+	// GB/T 17742-2020 table A.1: the lower VI boundary is approximately
+	// PGA=0.457 m/s² and PGV=0.0381 m/s.
+	if got := gbtInstrumentalIntensity(0.457, 0.0381); math.Abs(got-5.5) > 0.02 {
+		t.Fatalf("unexpected lower VI boundary: %.4f", got)
+	}
+	// Once both component intensities reach VI, the standard selects IV.
+	if got := gbtInstrumentalIntensity(0.936, 0.0817); math.Abs(got-6.5) > 0.02 {
+		t.Fatalf("unexpected upper VI boundary: %.4f", got)
+	}
+	if got := gbtInstrumentalIntensity(0, 0.1); got != 0 {
+		t.Fatalf("invalid ground motion must be rejected, got %.1f", got)
+	}
+}
+
+func TestGBTAndHybridModesExposeGroundMotionAudit(t *testing.T) {
+	event := Event{Type: "cenc_eew", Magnitude: 6.2, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
+	for _, mode := range []string{intensityModelModeGBT2020, intensityModelModeHybrid} {
+		t.Run(mode, func(t *testing.T) {
+			prediction := predictIntensity(Config{Alert: AlertConfig{IntensityModelMode: mode}}, event, 80, math.Sqrt(80*80+100), SiteCondition{})
+			if !prediction.UsedModel || prediction.FallbackReason != "" || prediction.Selected != prediction.Candidate {
+				t.Fatalf("expected active in-domain model prediction: %#v", prediction)
+			}
+			if prediction.Standard < 1 || prediction.PredictedPGA <= 0 || prediction.PredictedPGV <= 0 {
+				t.Fatalf("missing national-standard audit values: %#v", prediction)
+			}
+			if prediction.Version != gbtIntensityModelVersion {
+				t.Fatalf("unexpected model version: %#v", prediction)
+			}
+		})
+	}
+}
+
+func TestIntensityModelShadowAuditsHybridCandidate(t *testing.T) {
+	event := Event{Type: "cenc_eew", Magnitude: 6.2, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
+	prediction := predictIntensity(Config{Alert: AlertConfig{IntensityModelMode: intensityModelModeShadow}}, event, 80, math.Sqrt(80*80+100), SiteCondition{})
+	if prediction.Selected != prediction.Legacy || !prediction.UsedModel || prediction.Standard <= 0 || prediction.Calibration <= 0 {
+		t.Fatalf("shadow must retain legacy delivery and hybrid audit: %#v", prediction)
+	}
+	expected := round1(hybridGBTIntensity(prediction.Standard, prediction.Calibration))
+	if prediction.Model != expected {
+		t.Fatalf("shadow candidate is not hybrid output: got %.1f want %.1f", prediction.Model, expected)
+	}
+}
+
+func TestGeneratedGBTModelMetadata(t *testing.T) {
+	if gbtIntensityStandardName != "GB/T 17742-2020" || gbtIntensityModelRecordCount < 30000 || gbtIntensityModelEventCount < 450 {
+		t.Fatalf("unexpected GBT model metadata standard=%q records=%d events=%d", gbtIntensityStandardName, gbtIntensityModelRecordCount, gbtIntensityModelEventCount)
+	}
+	if len(gbtPGAModelRoots) != 63 || len(gbtPGVModelRoots) != 63 || len(gbtCalibrationModelRoots) != 63 {
+		t.Fatalf("unexpected GBT tree counts pga=%d pgv=%d calibration=%d", len(gbtPGAModelRoots), len(gbtPGVModelRoots), len(gbtCalibrationModelRoots))
 	}
 }
 
@@ -147,15 +220,19 @@ func TestLoadConfigRejectsUnsafeIntensityModelSettings(t *testing.T) {
 }
 
 func BenchmarkPredictIntensity700Locations(b *testing.B) {
-	cfg := Config{Alert: AlertConfig{IntensityModelMode: "active"}}
-	cfg.intensityModelSettings = defaultIntensityModelSettingsStore(cfg)
 	event := Event{Type: "cenc_eew", Magnitude: 6.2, DepthKM: 10, Latitude: 30.7, Longitude: 103.9}
 	site := SiteCondition{VS30: 260, Uncertainty: 0.12, Version: geoSCKSiteDataVersion}
-	b.ReportAllocs()
-	for n := 0; n < b.N; n++ {
-		for index := 0; index < 700; index++ {
-			distance := float64(index%350) + 1
-			_ = predictIntensity(cfg, event, distance, math.Sqrt(distance*distance+100), site)
-		}
+	for _, mode := range []string{intensityModelModeActive, intensityModelModeGBT2020, intensityModelModeHybrid} {
+		b.Run(mode, func(b *testing.B) {
+			cfg := Config{Alert: AlertConfig{IntensityModelMode: mode}}
+			cfg.intensityModelSettings = defaultIntensityModelSettingsStore(cfg)
+			b.ReportAllocs()
+			for n := 0; n < b.N; n++ {
+				for index := 0; index < 700; index++ {
+					distance := float64(index%350) + 1
+					_ = predictIntensity(cfg, event, distance, math.Sqrt(distance*distance+100), site)
+				}
+			}
+		})
 	}
 }

@@ -93,10 +93,12 @@ alert:
   p_wave_km_s: 6.0
   stale_origin_seconds: 600
   dedup_keep_minutes: 120
-  # Lightweight mainland-China intensity model trained offline from the
-  # National Earthquake Science Data Center ground-motion dataset.
-  # legacy: old formula only; shadow: record the candidate without changing
-  # delivery; active: use the bounded candidate and stable-formula fallback.
+  # Lightweight mainland-China intensity models trained offline from National
+  # Earthquake Science Data Center ground-motion records.
+  # legacy: old formula; active: existing direct-intensity model;
+  # gbt2020: predict PGA/PGV then apply GB/T 17742-2020;
+  # hybrid: GB/T result plus high-intensity calibration;
+  # shadow: audit hybrid output while delivery continues to use legacy.
   intensity_model_mode: "shadow"
   # The learned model can never move farther than this from the stable physical
   # attenuation baseline. Values above 2.0 are rejected during startup.

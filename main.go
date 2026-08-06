@@ -441,26 +441,30 @@ type SimulationPreview struct {
 }
 
 type Decision struct {
-	DistanceKM                  float64
-	HypocentralKM               float64
-	EstimatedIntensity          float64
-	EstimatedIntensityRank      int
-	LegacyEstimatedIntensity    float64
-	BaselineEstimatedIntensity  float64
-	ModelEstimatedIntensity     float64
-	CandidateEstimatedIntensity float64
-	IntensityModelMode          string
-	IntensityModelVersion       string
-	IntensityModelUsed          bool
-	IntensityFallbackReason     string
-	SiteVS30                    float64
-	SiteUncertainty             float64
-	SiteCorrection              float64
-	SiteCorrectionReason        string
-	SArrival                    time.Time
-	PArrival                    time.Time
-	SecondsToS                  int
-	SecondsToP                  int
+	DistanceKM                    float64
+	HypocentralKM                 float64
+	EstimatedIntensity            float64
+	EstimatedIntensityRank        int
+	LegacyEstimatedIntensity      float64
+	BaselineEstimatedIntensity    float64
+	ModelEstimatedIntensity       float64
+	StandardEstimatedIntensity    float64
+	CalibrationEstimatedIntensity float64
+	CandidateEstimatedIntensity   float64
+	PredictedPGA                  float64
+	PredictedPGV                  float64
+	IntensityModelMode            string
+	IntensityModelVersion         string
+	IntensityModelUsed            bool
+	IntensityFallbackReason       string
+	SiteVS30                      float64
+	SiteUncertainty               float64
+	SiteCorrection                float64
+	SiteCorrectionReason          string
+	SArrival                      time.Time
+	PArrival                      time.Time
+	SecondsToS                    int
+	SecondsToP                    int
 }
 
 type Notifier struct {
@@ -744,8 +748,8 @@ func loadConfig(path string) (Config, error) {
 	if rawIntensityMode == "" {
 		rawIntensityMode = intensityModelModeShadow
 	}
-	if rawIntensityMode != intensityModelModeLegacy && rawIntensityMode != intensityModelModeShadow && rawIntensityMode != intensityModelModeActive {
-		return Config{}, errors.New("alert.intensity_model_mode must be legacy, shadow, or active")
+	if _, err := validateIntensityModelMode(rawIntensityMode); err != nil {
+		return Config{}, errors.New("alert.intensity_model_mode must be legacy, shadow, active, gbt2020, or hybrid")
 	}
 	cfg.Alert.IntensityModelMode = rawIntensityMode
 	if cfg.Alert.IntensityModelMaxCorrection <= 0 {
@@ -4242,44 +4246,48 @@ type fanoutResult struct {
 }
 
 type deliveryAuditRecord struct {
-	EventID                     string   `json:"event_id"`
-	ReportNum                   int      `json:"report_num"`
-	Type                        string   `json:"type"`
-	OriginTime                  string   `json:"origin_time"`
-	ReceivedAt                  string   `json:"received_at"`
-	FanoutStartedAt             string   `json:"fanout_started_at"`
-	RecordedAt                  string   `json:"recorded_at"`
-	Status                      string   `json:"status"`
-	Reason                      string   `json:"reason,omitempty"`
-	BarkMasked                  string   `json:"bark_masked"`
-	BarkHash                    string   `json:"bark_hash"`
-	BarkServer                  string   `json:"bark_server"`
-	NotifyLevel                 string   `json:"notify_level,omitempty"`
-	EstimatedIntensity          Decimal1 `json:"estimated_intensity"`
-	LegacyEstimatedIntensity    Decimal1 `json:"legacy_estimated_intensity"`
-	BaselineEstimatedIntensity  Decimal1 `json:"baseline_estimated_intensity"`
-	ModelEstimatedIntensity     Decimal1 `json:"model_estimated_intensity,omitempty"`
-	CandidateEstimatedIntensity Decimal1 `json:"candidate_estimated_intensity"`
-	IntensityModelMode          string   `json:"intensity_model_mode,omitempty"`
-	IntensityModelVersion       string   `json:"intensity_model_version,omitempty"`
-	IntensityModelUsed          bool     `json:"intensity_model_used,omitempty"`
-	IntensityFallbackReason     string   `json:"intensity_fallback_reason,omitempty"`
-	SiteVS30                    Decimal1 `json:"site_vs30,omitempty"`
-	SiteUncertainty             float64  `json:"site_uncertainty,omitempty"`
-	SiteCorrection              Decimal1 `json:"site_correction,omitempty"`
-	SiteCorrectionReason        string   `json:"site_correction_reason,omitempty"`
-	DistanceKM                  float64  `json:"distance_km"`
-	HypocentralKM               float64  `json:"hypocentral_km"`
-	SecondsToS                  int      `json:"seconds_to_s"`
-	ElapsedMS                   int64    `json:"elapsed_ms,omitempty"`
-	FirstAttemptDoneAt          string   `json:"first_attempt_done_at,omitempty"`
-	FirstAttemptOK              bool     `json:"first_attempt_ok,omitempty"`
-	FirstAttemptKnown           bool     `json:"first_attempt_known,omitempty"`
-	RetryCount                  int      `json:"retry_count,omitempty"`
-	Error                       string   `json:"error,omitempty"`
-	LocationName                string   `json:"location_name,omitempty"`
-	Latitude                    float64  `json:"latitude"`
-	Longitude                   float64  `json:"longitude"`
+	EventID                       string   `json:"event_id"`
+	ReportNum                     int      `json:"report_num"`
+	Type                          string   `json:"type"`
+	OriginTime                    string   `json:"origin_time"`
+	ReceivedAt                    string   `json:"received_at"`
+	FanoutStartedAt               string   `json:"fanout_started_at"`
+	RecordedAt                    string   `json:"recorded_at"`
+	Status                        string   `json:"status"`
+	Reason                        string   `json:"reason,omitempty"`
+	BarkMasked                    string   `json:"bark_masked"`
+	BarkHash                      string   `json:"bark_hash"`
+	BarkServer                    string   `json:"bark_server"`
+	NotifyLevel                   string   `json:"notify_level,omitempty"`
+	EstimatedIntensity            Decimal1 `json:"estimated_intensity"`
+	LegacyEstimatedIntensity      Decimal1 `json:"legacy_estimated_intensity"`
+	BaselineEstimatedIntensity    Decimal1 `json:"baseline_estimated_intensity"`
+	ModelEstimatedIntensity       Decimal1 `json:"model_estimated_intensity,omitempty"`
+	StandardEstimatedIntensity    Decimal1 `json:"standard_estimated_intensity,omitempty"`
+	CalibrationEstimatedIntensity Decimal1 `json:"calibration_estimated_intensity,omitempty"`
+	CandidateEstimatedIntensity   Decimal1 `json:"candidate_estimated_intensity"`
+	PredictedPGA                  float64  `json:"predicted_pga_mps2,omitempty"`
+	PredictedPGV                  float64  `json:"predicted_pgv_mps,omitempty"`
+	IntensityModelMode            string   `json:"intensity_model_mode,omitempty"`
+	IntensityModelVersion         string   `json:"intensity_model_version,omitempty"`
+	IntensityModelUsed            bool     `json:"intensity_model_used,omitempty"`
+	IntensityFallbackReason       string   `json:"intensity_fallback_reason,omitempty"`
+	SiteVS30                      Decimal1 `json:"site_vs30,omitempty"`
+	SiteUncertainty               float64  `json:"site_uncertainty,omitempty"`
+	SiteCorrection                Decimal1 `json:"site_correction,omitempty"`
+	SiteCorrectionReason          string   `json:"site_correction_reason,omitempty"`
+	DistanceKM                    float64  `json:"distance_km"`
+	HypocentralKM                 float64  `json:"hypocentral_km"`
+	SecondsToS                    int      `json:"seconds_to_s"`
+	ElapsedMS                     int64    `json:"elapsed_ms,omitempty"`
+	FirstAttemptDoneAt            string   `json:"first_attempt_done_at,omitempty"`
+	FirstAttemptOK                bool     `json:"first_attempt_ok,omitempty"`
+	FirstAttemptKnown             bool     `json:"first_attempt_known,omitempty"`
+	RetryCount                    int      `json:"retry_count,omitempty"`
+	Error                         string   `json:"error,omitempty"`
+	LocationName                  string   `json:"location_name,omitempty"`
+	Latitude                      float64  `json:"latitude"`
+	Longitude                     float64  `json:"longitude"`
 }
 
 type deliveryAuditSummary struct {
@@ -4518,38 +4526,42 @@ func shouldAuditEvent(event Event) bool {
 func deliveryAuditRecordForTarget(cfg Config, event Event, sub Subscription, decision Decision, receivedAt, startedAt time.Time, status, reason, level string, elapsed time.Duration, firstAttemptDoneAt time.Time, firstAttemptOK, firstAttemptKnown bool, retries int, err error) deliveryAuditRecord {
 	server := normalizeBarkServer(sub.BarkServer, cfg)
 	record := deliveryAuditRecord{
-		EventID:                     event.EventID,
-		ReportNum:                   event.ReportNum,
-		Type:                        event.Type,
-		OriginTime:                  formatBeijing(event.OriginTime, time.RFC3339),
-		ReceivedAt:                  formatBeijing(receivedAt, time.RFC3339Nano),
-		FanoutStartedAt:             formatBeijing(startedAt, time.RFC3339Nano),
-		RecordedAt:                  formatBeijing(time.Now(), time.RFC3339Nano),
-		Status:                      status,
-		Reason:                      reason,
-		BarkMasked:                  maskKey(sub.BarkID),
-		BarkHash:                    hashKey(sub.BarkID),
-		BarkServer:                  server,
-		NotifyLevel:                 level,
-		EstimatedIntensity:          Decimal1(decision.EstimatedIntensity),
-		LegacyEstimatedIntensity:    Decimal1(decision.LegacyEstimatedIntensity),
-		BaselineEstimatedIntensity:  Decimal1(decision.BaselineEstimatedIntensity),
-		ModelEstimatedIntensity:     Decimal1(decision.ModelEstimatedIntensity),
-		CandidateEstimatedIntensity: Decimal1(decision.CandidateEstimatedIntensity),
-		IntensityModelMode:          decision.IntensityModelMode,
-		IntensityModelVersion:       decision.IntensityModelVersion,
-		IntensityModelUsed:          decision.IntensityModelUsed,
-		IntensityFallbackReason:     decision.IntensityFallbackReason,
-		SiteVS30:                    Decimal1(decision.SiteVS30),
-		SiteUncertainty:             decision.SiteUncertainty,
-		SiteCorrection:              Decimal1(decision.SiteCorrection),
-		SiteCorrectionReason:        decision.SiteCorrectionReason,
-		DistanceKM:                  round1(decision.DistanceKM),
-		HypocentralKM:               round1(decision.HypocentralKM),
-		SecondsToS:                  decision.SecondsToS,
-		LocationName:                sub.LocationName,
-		Latitude:                    math.Round(sub.Latitude*10000) / 10000,
-		Longitude:                   math.Round(sub.Longitude*10000) / 10000,
+		EventID:                       event.EventID,
+		ReportNum:                     event.ReportNum,
+		Type:                          event.Type,
+		OriginTime:                    formatBeijing(event.OriginTime, time.RFC3339),
+		ReceivedAt:                    formatBeijing(receivedAt, time.RFC3339Nano),
+		FanoutStartedAt:               formatBeijing(startedAt, time.RFC3339Nano),
+		RecordedAt:                    formatBeijing(time.Now(), time.RFC3339Nano),
+		Status:                        status,
+		Reason:                        reason,
+		BarkMasked:                    maskKey(sub.BarkID),
+		BarkHash:                      hashKey(sub.BarkID),
+		BarkServer:                    server,
+		NotifyLevel:                   level,
+		EstimatedIntensity:            Decimal1(decision.EstimatedIntensity),
+		LegacyEstimatedIntensity:      Decimal1(decision.LegacyEstimatedIntensity),
+		BaselineEstimatedIntensity:    Decimal1(decision.BaselineEstimatedIntensity),
+		ModelEstimatedIntensity:       Decimal1(decision.ModelEstimatedIntensity),
+		StandardEstimatedIntensity:    Decimal1(decision.StandardEstimatedIntensity),
+		CalibrationEstimatedIntensity: Decimal1(decision.CalibrationEstimatedIntensity),
+		CandidateEstimatedIntensity:   Decimal1(decision.CandidateEstimatedIntensity),
+		PredictedPGA:                  decision.PredictedPGA,
+		PredictedPGV:                  decision.PredictedPGV,
+		IntensityModelMode:            decision.IntensityModelMode,
+		IntensityModelVersion:         decision.IntensityModelVersion,
+		IntensityModelUsed:            decision.IntensityModelUsed,
+		IntensityFallbackReason:       decision.IntensityFallbackReason,
+		SiteVS30:                      Decimal1(decision.SiteVS30),
+		SiteUncertainty:               decision.SiteUncertainty,
+		SiteCorrection:                Decimal1(decision.SiteCorrection),
+		SiteCorrectionReason:          decision.SiteCorrectionReason,
+		DistanceKM:                    round1(decision.DistanceKM),
+		HypocentralKM:                 round1(decision.HypocentralKM),
+		SecondsToS:                    decision.SecondsToS,
+		LocationName:                  sub.LocationName,
+		Latitude:                      math.Round(sub.Latitude*10000) / 10000,
+		Longitude:                     math.Round(sub.Longitude*10000) / 10000,
 	}
 	if elapsed > 0 {
 		record.ElapsedMS = elapsed.Milliseconds()
@@ -5909,26 +5921,30 @@ func evaluate(cfg Config, sub Subscription, event Event) Decision {
 		Version:     sub.SiteDataVersion,
 	})
 	return Decision{
-		DistanceKM:                  dist,
-		HypocentralKM:               hypo,
-		EstimatedIntensity:          intensity.Selected,
-		EstimatedIntensityRank:      intensityRank(intensity.Selected),
-		LegacyEstimatedIntensity:    intensity.Legacy,
-		BaselineEstimatedIntensity:  intensity.Baseline,
-		ModelEstimatedIntensity:     intensity.Model,
-		CandidateEstimatedIntensity: intensity.Candidate,
-		IntensityModelMode:          intensity.Mode,
-		IntensityModelVersion:       intensity.Version,
-		IntensityModelUsed:          intensity.UsedModel,
-		IntensityFallbackReason:     intensity.FallbackReason,
-		SiteVS30:                    intensity.SiteVS30,
-		SiteUncertainty:             intensity.SiteUncertainty,
-		SiteCorrection:              intensity.SiteCorrection,
-		SiteCorrectionReason:        intensity.SiteCorrectionReason,
-		SArrival:                    sArrival,
-		PArrival:                    pArrival,
-		SecondsToS:                  int(math.Round(sArrival.Sub(now).Seconds())),
-		SecondsToP:                  int(math.Round(pArrival.Sub(now).Seconds())),
+		DistanceKM:                    dist,
+		HypocentralKM:                 hypo,
+		EstimatedIntensity:            intensity.Selected,
+		EstimatedIntensityRank:        intensityRank(intensity.Selected),
+		LegacyEstimatedIntensity:      intensity.Legacy,
+		BaselineEstimatedIntensity:    intensity.Baseline,
+		ModelEstimatedIntensity:       intensity.Model,
+		StandardEstimatedIntensity:    intensity.Standard,
+		CalibrationEstimatedIntensity: intensity.Calibration,
+		CandidateEstimatedIntensity:   intensity.Candidate,
+		PredictedPGA:                  intensity.PredictedPGA,
+		PredictedPGV:                  intensity.PredictedPGV,
+		IntensityModelMode:            intensity.Mode,
+		IntensityModelVersion:         intensity.Version,
+		IntensityModelUsed:            intensity.UsedModel,
+		IntensityFallbackReason:       intensity.FallbackReason,
+		SiteVS30:                      intensity.SiteVS30,
+		SiteUncertainty:               intensity.SiteUncertainty,
+		SiteCorrection:                intensity.SiteCorrection,
+		SiteCorrectionReason:          intensity.SiteCorrectionReason,
+		SArrival:                      sArrival,
+		PArrival:                      pArrival,
+		SecondsToS:                    int(math.Round(sArrival.Sub(now).Seconds())),
+		SecondsToP:                    int(math.Round(pArrival.Sub(now).Seconds())),
 	}
 }
 

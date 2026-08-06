@@ -68,3 +68,29 @@ func TestIntensityModelEnvironmentOverrideWinsOverPersistedMode(t *testing.T) {
 		t.Fatalf("environment override was not applied: %#v", settings)
 	}
 }
+
+func TestIntensityModelSettingsAcceptAllPublishedModes(t *testing.T) {
+	for _, mode := range []string{
+		intensityModelModeLegacy,
+		intensityModelModeShadow,
+		intensityModelModeActive,
+		intensityModelModeGBT2020,
+		intensityModelModeHybrid,
+	} {
+		if got, err := validateIntensityModelMode(mode); err != nil || got != mode {
+			t.Fatalf("mode %q was rejected: got=%q err=%v", mode, got, err)
+		}
+	}
+}
+
+func TestIntensityModelSettingsReportModeSpecificVersion(t *testing.T) {
+	cfg := Config{Alert: AlertConfig{IntensityModelMode: intensityModelModeGBT2020}}
+	settings := intensityModelSettings(cfg)
+	if settings.ModelVersion != gbtIntensityModelVersion || settings.StandardName != gbtIntensityStandardName {
+		t.Fatalf("unexpected GBT metadata: %#v", settings)
+	}
+	if settings.ModelVersions[intensityModelModeActive] != officialIntensityModelVersion ||
+		settings.ModelVersions[intensityModelModeHybrid] != gbtIntensityModelVersion {
+		t.Fatalf("missing available model versions: %#v", settings.ModelVersions)
+	}
+}

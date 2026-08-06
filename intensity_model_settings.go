@@ -14,19 +14,29 @@ import (
 )
 
 type IntensityModelSettings struct {
-	Mode              string  `json:"mode"`
-	MaxCorrection     float64 `json:"max_correction"`
-	ModelVersion      string  `json:"model_version"`
-	SiteDataVersion   string  `json:"site_data_version"`
-	SiteCorrectionMax float64 `json:"site_correction_max"`
-	Forced            bool    `json:"forced"`
-	UpdatedAt         string  `json:"updated_at,omitempty"`
+	Mode              string            `json:"mode"`
+	MaxCorrection     float64           `json:"max_correction"`
+	ModelVersion      string            `json:"model_version"`
+	ModelVersions     map[string]string `json:"model_versions"`
+	StandardName      string            `json:"standard_name"`
+	SiteDataVersion   string            `json:"site_data_version"`
+	SiteCorrectionMax float64           `json:"site_correction_max"`
+	Forced            bool              `json:"forced"`
+	UpdatedAt         string            `json:"updated_at,omitempty"`
 }
 
 type intensityModelSettingsStore struct {
 	mu       sync.RWMutex
 	path     string
 	settings IntensityModelSettings
+}
+
+var intensityModelVersions = map[string]string{
+	intensityModelModeLegacy:  "legacy",
+	intensityModelModeActive:  officialIntensityModelVersion,
+	intensityModelModeGBT2020: gbtIntensityModelVersion,
+	intensityModelModeHybrid:  gbtIntensityModelVersion,
+	intensityModelModeShadow:  gbtIntensityModelVersion,
 }
 
 func defaultIntensityModelSettings(alert AlertConfig) IntensityModelSettings {
@@ -38,7 +48,9 @@ func defaultIntensityModelSettings(alert AlertConfig) IntensityModelSettings {
 	return IntensityModelSettings{
 		Mode:              mode,
 		MaxCorrection:     maxCorrection,
-		ModelVersion:      officialIntensityModelVersion,
+		ModelVersion:      intensityModelVersionForMode(mode),
+		ModelVersions:     availableIntensityModelVersions(),
+		StandardName:      gbtIntensityStandardName,
 		SiteDataVersion:   geoSCKSiteDataVersion,
 		SiteCorrectionMax: maxSiteIntensityIncrease,
 	}
@@ -97,8 +109,9 @@ func newIntensityModelSettingsStore(cfg Config) (*intensityModelSettingsStore, e
 
 func validateIntensityModelMode(value string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(value))
-	if mode != intensityModelModeLegacy && mode != intensityModelModeShadow && mode != intensityModelModeActive {
-		return "", errors.New("intensity model mode must be legacy, shadow, or active")
+	if mode != intensityModelModeLegacy && mode != intensityModelModeShadow && mode != intensityModelModeActive &&
+		mode != intensityModelModeGBT2020 && mode != intensityModelModeHybrid {
+		return "", errors.New("intensity model mode must be legacy, shadow, active, gbt2020, or hybrid")
 	}
 	return mode, nil
 }
@@ -117,7 +130,9 @@ func (s *intensityModelSettingsStore) Snapshot() IntensityModelSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	settings := s.settings
-	settings.ModelVersion = officialIntensityModelVersion
+	settings.ModelVersion = intensityModelVersionForMode(settings.Mode)
+	settings.ModelVersions = availableIntensityModelVersions()
+	settings.StandardName = gbtIntensityStandardName
 	settings.SiteDataVersion = geoSCKSiteDataVersion
 	settings.SiteCorrectionMax = maxSiteIntensityIncrease
 	return settings
@@ -135,7 +150,9 @@ func (s *intensityModelSettingsStore) Update(mode string, now time.Time) (Intens
 	defer s.mu.Unlock()
 	settings := s.settings
 	settings.Mode = mode
-	settings.ModelVersion = officialIntensityModelVersion
+	settings.ModelVersion = intensityModelVersionForMode(mode)
+	settings.ModelVersions = availableIntensityModelVersions()
+	settings.StandardName = gbtIntensityStandardName
 	settings.SiteDataVersion = geoSCKSiteDataVersion
 	settings.SiteCorrectionMax = maxSiteIntensityIncrease
 	settings.Forced = false
@@ -185,8 +202,14 @@ func intensityModelSettings(cfg Config) IntensityModelSettings {
 		settings.Mode = cfg.intensityModelModeOverride
 		settings.Forced = true
 	}
-	settings.ModelVersion = officialIntensityModelVersion
+	settings.ModelVersion = intensityModelVersionForMode(settings.Mode)
+	settings.ModelVersions = availableIntensityModelVersions()
+	settings.StandardName = gbtIntensityStandardName
 	settings.SiteDataVersion = geoSCKSiteDataVersion
 	settings.SiteCorrectionMax = maxSiteIntensityIncrease
 	return settings
+}
+
+func availableIntensityModelVersions() map[string]string {
+	return intensityModelVersions
 }
