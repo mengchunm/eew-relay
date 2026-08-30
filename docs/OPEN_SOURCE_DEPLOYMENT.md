@@ -5,7 +5,7 @@
 ## 部署条件
 
 - Linux amd64/arm64 服务器，建议至少 2 核 CPU、4 GB 内存和 20 GB 可用磁盘；
-- Docker Engine 和 Docker Compose v2，或 Go `1.25.12`；
+- Docker Engine 和 Docker Compose v2，或 Go `1.25.13`；
 - 可访问 `wss://ws-api.wolfx.jp/all_eew`、Bark/APNs、地图和地址搜索上游；
 - 一个 HTTPS 域名和反向代理；
 - PostgreSQL/PostGIS 持久化目录；
