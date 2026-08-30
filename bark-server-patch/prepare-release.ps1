@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $upstreamCommit = "478659ecdd75a38185d7275d154d78e9c2b752b4"
 $upstreamVersion = "v2.3.5"
-$patchVersion = "eew.2"
+$patchVersion = "eew.3"
 $repo = (git rev-parse --show-toplevel).Trim()
 if (-not $repo) {
     throw "当前目录不在 Git 仓库中。"

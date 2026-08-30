@@ -34,9 +34,8 @@ type intensityModelSettingsStore struct {
 var intensityModelVersions = map[string]string{
 	intensityModelModeLegacy:  "legacy",
 	intensityModelModeActive:  officialIntensityModelVersion,
-	intensityModelModeGBT2020: gbtIntensityModelVersion,
-	intensityModelModeHybrid:  gbtIntensityModelVersion,
-	intensityModelModeShadow:  gbtIntensityModelVersion,
+	intensityModelModeGBT2020: yu2013IntensityAlgorithmVersion,
+	intensityModelModeShadow:  yu2013IntensityAlgorithmVersion,
 }
 
 func defaultIntensityModelSettings(alert AlertConfig) IntensityModelSettings {
@@ -109,9 +108,11 @@ func newIntensityModelSettingsStore(cfg Config) (*intensityModelSettingsStore, e
 
 func validateIntensityModelMode(value string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(value))
-	if mode != intensityModelModeLegacy && mode != intensityModelModeShadow && mode != intensityModelModeActive &&
-		mode != intensityModelModeGBT2020 && mode != intensityModelModeHybrid {
-		return "", errors.New("intensity model mode must be legacy, shadow, active, gbt2020, or hybrid")
+	if mode == intensityModelModeHybrid {
+		return intensityModelModeGBT2020, nil
+	}
+	if mode != intensityModelModeLegacy && mode != intensityModelModeShadow && mode != intensityModelModeActive && mode != intensityModelModeGBT2020 {
+		return "", errors.New("intensity model mode must be legacy, active, gbt2020, or shadow")
 	}
 	return mode, nil
 }

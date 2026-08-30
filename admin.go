@@ -489,7 +489,7 @@ func registerAdminRoutes(mux *http.ServeMux, cfg Config, store *Store, alertCach
 		}
 		mode, err := validateIntensityModelMode(request.Mode)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "算法模式仅支持 legacy、shadow、active、gbt2020 或 hybrid"})
+			writeJSON(w, http.StatusBadRequest, APIResponse{Success: false, Message: "算法模式仅支持 legacy、active 或 gbt2020"})
 			return
 		}
 		if cfg.intensityModelModeOverride != "" {

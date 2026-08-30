@@ -1,4 +1,7 @@
-FROM golang:1.25.12-alpine3.23 AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine3.23 AS build
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 
 WORKDIR /src
 
@@ -6,7 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath \
     -ldflags="-s -w -buildid=" \
     -o /out/eew-bark .

@@ -8,12 +8,14 @@ The patch adds:
 - a bounded MySQL connection pool and query timeout;
 - a read-through device-token cache, updated on registration and deletion;
 - HTTP 404 for missing device keys and HTTP 503 for transient database errors;
-- a process-wide APNs in-flight request limit.
+- a process-wide APNs in-flight request limit;
+- guaranteed silent `passive` notifications by omitting the APNs `sound` field,
+  even though upstream Bark Server supplies `1107.caf` by default.
 
 For development and CI, build the source image with:
 
 ```sh
-docker build -t bark-server:eew-v2.3.5.1 bark-server-patch
+docker build -t bark-server:v2.3.5-eew.3 bark-server-patch
 ```
 
 For production, compile and test the Linux binary on the release workstation:

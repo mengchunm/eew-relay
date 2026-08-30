@@ -20,7 +20,19 @@ index 6d845b4..73fef42 100644
  
  // Initialize APNS client pool
  func init() {
-@@ -128,6 +131,8 @@ func Push(msg *PushMessage) (code int, err error) {
+@@ -116,8 +119,9 @@ func Push(msg *PushMessage) (code int, err error) {
+ 		pl = pl.AlertTitle(msg.Title).
+ 			AlertSubtitle(msg.Subtitle).
+-			AlertBody(msg.Body).
+-			Sound(msg.Sound).
+-			Category("myNotificationCategory")
++			AlertBody(msg.Body)
++		pl = addNotificationSound(pl, msg).
++			Category("myNotificationCategory")
+ 		group, exist := msg.ExtParams["group"]
+ 		if exist {
+ 			pl = pl.ThreadID(group.(string))
+@@ -128,6 +132,8 @@ func Push(msg *PushMessage) (code int, err error) {
  		// Change all parameter names to lowercase to prevent inconsistent capitalization
  		pl.Custom(strings.ToLower(k), fmt.Sprintf("%v", v))
  	}
@@ -29,7 +41,7 @@ index 6d845b4..73fef42 100644
  
  	client := <-clients // grab a client from the pool
  	clients <- client   // add the client back to the pool
-@@ -144,7 +149,15 @@ func Push(msg *PushMessage) (code int, err error) {
+@@ -144,7 +150,23 @@ func Push(msg *PushMessage) (code int, err error) {
  		return 500, err
  	}
  	if resp.StatusCode != 200 {
@@ -39,12 +51,84 @@ index 6d845b4..73fef42 100644
  	return 200, nil
  }
 +
++func addNotificationSound(pl *payload.Payload, msg *PushMessage) *payload.Payload {
++	level := strings.TrimSpace(fmt.Sprint(msg.ExtParams["level"]))
++	if strings.EqualFold(level, "passive") || strings.TrimSpace(msg.Sound) == "" {
++		return pl
++	}
++	return pl.Sound(msg.Sound)
++}
++
 +func positiveEnvInt(name string, fallback int) int {
 +	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
 +	if err != nil || value <= 0 {
 +		return fallback
 +	}
 +	return value
++}
+diff --git a/apns/apns_test.go b/apns/apns_test.go
+new file mode 100644
+index 0000000..48e48da
+--- /dev/null
++++ b/apns/apns_test.go
+@@ -0,0 +1,52 @@
++package apns
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/sideshow/apns2/payload"
++)
++
++func TestAddNotificationSound(t *testing.T) {
++	tests := []struct {
++		name      string
++		message   PushMessage
++		wantSound string
++	}{
++		{
++			name:    "passive omits upstream default sound",
++			message: PushMessage{Sound: "1107", ExtParams: map[string]interface{}{"level": "passive"}},
++		},
++		{
++			name:    "empty sound stays omitted",
++			message: PushMessage{ExtParams: map[string]interface{}{"level": "active"}},
++		},
++		{
++			name:      "active keeps configured sound",
++			message:   PushMessage{Sound: "alarm.caf", ExtParams: map[string]interface{}{"level": "active"}},
++			wantSound: "alarm.caf",
++		},
++		{
++			name:      "critical keeps configured sound",
++			message:   PushMessage{Sound: "alarm.caf", ExtParams: map[string]interface{}{"level": "critical"}},
++			wantSound: "alarm.caf",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			built := addNotificationSound(payload.NewPayload(), &tt.message)
++			data, err := json.Marshal(built)
++			if err != nil {
++				t.Fatalf("marshal payload: %v", err)
++			}
++			var body struct {
++				APS map[string]interface{} `json:"aps"`
++			}
++			if err := json.Unmarshal(data, &body); err != nil {
++				t.Fatalf("unmarshal payload: %v", err)
++			}
++			got, present := body.APS["sound"]
++			if tt.wantSound == "" && present {
++				t.Fatalf("sound must be omitted, got %v in %s", got, data)
++			}
++			if tt.wantSound != "" && got != tt.wantSound {
++				t.Fatalf("sound = %v, want %q in %s", got, tt.wantSound, data)
++			}
++		})
++	}
 +}
 diff --git a/database/mysql.go b/database/mysql.go
 index e51c1b1..ae3b355 100644

@@ -37,8 +37,7 @@ services:
         max-file: "3"
 
   eew-bark:
-    image: eew-bark:local
-    build: .
+    image: ghcr.io/mengchunm/eew-relay:latest
     container_name: eew-bark
     restart: unless-stopped
     init: true

@@ -22,7 +22,7 @@ WORKDIR /src
 # Compile and test the patched leaf packages, then compile the main package.
 RUN go test ./database ./apns
 RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags="-s -w -buildid= -X 'main.version=v2.3.5-eew.2' -X 'main.buildDate=reproducible' -X 'main.commitID=478659ecdd75a38185d7275d154d78e9c2b752b4'" \
+    -ldflags="-s -w -buildid= -X 'main.version=v2.3.5-eew.3' -X 'main.buildDate=reproducible' -X 'main.commitID=478659ecdd75a38185d7275d154d78e9c2b752b4'" \
     -o /out/bark-server .
 
 FROM alpine:3.22

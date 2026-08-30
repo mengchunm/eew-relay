@@ -59,15 +59,27 @@ chmod 700 data
 
 ## Docker Compose 部署
 
+默认 Compose 使用 GitHub Container Registry 的预构建应用镜像：
+
 ```bash
 docker compose config --quiet
-docker compose build --pull
+docker compose pull eew-bark postgres
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:30010/health
 ```
 
-默认 Compose 包含应用、PostgreSQL/PostGIS 和固定版本的行政区数据。首次初始化边界和空间索引需要更长时间；后续启动复用持久化目录，不会重复导入。
+默认应用镜像为 `ghcr.io/mengchunm/eew-relay:latest`。维护者通过 GitHub Actions 在 `main` 更新时发布 `latest`、`main` 和不可变 `sha-...` 标签；如果 GHCR package 尚未设置为 Public，部署机需要先登录 GHCR。首次拉取 PostgreSQL 行政区镜像仍会下载固定的地理数据层；首次初始化边界和空间索引也需要更长时间，后续启动会复用持久化目录。
+
+如需从源码构建应用，使用源码覆盖文件，不要修改默认 Compose：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.source.yml build --pull eew-bark
+docker compose -f docker-compose.yml -f docker-compose.source.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.source.yml ps
+```
+
+源码构建会下载 Go 工具链和模块，网络较慢时仍可能耗时；普通部署不需要执行这组命令。
 
 如果使用自建 Bark bbolt 数据库：
 
@@ -100,8 +112,7 @@ docker compose -f docker-compose.yml -f docker-compose.self-hosted.yml up -d
 git fetch origin
 git switch main
 git pull --ff-only origin main
-go test ./...
-docker compose build --pull
+docker compose pull eew-bark
 docker compose up -d --no-deps --force-recreate eew-bark
 curl -fsS http://127.0.0.1:30010/health
 ```

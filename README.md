@@ -53,7 +53,7 @@ go run . -config config.yaml -test-bark YOUR_BARK_KEY
 
 ## Docker 部署
 
-镜像使用固定的 `golang:1.25.12-alpine3.23` 多阶段构建，不依赖本地预编译二进制。部署前先创建仅当前用户可读的配置和数据目录：
+默认 Docker Compose 使用 GitHub Container Registry 发布的预构建应用镜像，不在部署机下载 Go 工具链、Go 模块或重新编译。仓库仍保留源码构建方式，适合开发和无法访问 GHCR 的环境。首次拉取 PostgreSQL 行政区镜像仍会下载固定的地理数据层，这是数据库初始化所需的大文件；应用镜像本身不包含这份数据。部署前先创建仅当前用户可读的配置和数据目录：
 
 部署者必须先完成以下配置，示例域名不能直接用于生产：
 
@@ -73,7 +73,7 @@ chmod 600 config.yaml .env
 chmod 700 data
 
 docker compose config --quiet
-docker compose build --pull
+docker compose pull eew-bark postgres
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:30010/health
@@ -85,7 +85,17 @@ curl -fsS http://127.0.0.1:30010/health
 docker compose logs --tail=200 -f eew-bark
 ```
 
-Compose 已启用 PostgreSQL/PostGIS、容器健康检查、只读应用根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 保存 PostgreSQL、历史数据和审计数据。官方 Bark 模式不挂载 `bark.db`。
+Compose 已启用 PostgreSQL/PostGIS、容器健康检查、只读应用根文件系统、capability 清理和 `json-file` 日志轮转。`./data` 保存 PostgreSQL、历史数据和审计数据。官方 Bark 模式不挂载 `bark.db`。预构建应用镜像发布为 `ghcr.io/mengchunm/eew-relay:latest` 和 `:main`；维护者需要将 GHCR package 设置为 Public，否则部署机需要先执行 `docker login ghcr.io`。
+
+如果要从源码构建应用，而不是拉取预构建镜像，使用单独的源码覆盖文件，避免误把慢速源码构建当成默认部署：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.source.yml build --pull eew-bark
+docker compose -f docker-compose.yml -f docker-compose.source.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.source.yml ps
+```
+
+预构建镜像更新后执行 `docker compose pull eew-bark && docker compose up -d --no-deps --force-recreate eew-bark`；Compose 默认使用 `latest`，实际部署前可以将其替换为 GitHub Actions 发布日志中的不可变 `sha-...` 标签。
 
 `docker-compose.yml` 默认只绑定：
 
@@ -232,13 +242,13 @@ P/S 波到达时间使用快速混合模型：
 
 这样做的目的是避免远距离时固定速度模型把到达时间估得过晚。计算复杂度仍为 O(1)，每个订阅只进行一次球面距离、一次平方根和几十项以内的表插值，通常远小于 Bark HTTP 推送耗时。
 
-本地烈度仍是快速估算，不等同震后结合台站波形和现场调查形成的官方烈度图。服务内置由国家地震科学数据中心大陆强震动记录离线训练的轻量模型，线上使用实时 API 已有的震级、震中坐标、深度和订阅地距离，并读取订阅地点预先计算的场地条件；训练集、Python 和机器学习运行库不会进入服务器。国标模型分别预测订阅地点的 PGA、PGV，再严格按 GB/T 17742-2020 附录 A 换算预估烈度；混合模型以该结果为锚点，加入对稀少高烈度样本加权训练的受限校准。训练流程删除完全重复、无效地震动、越界记录及与国标换算明显冲突的数据，并按事件平衡权重。模型强制满足震级增大时输出不下降、距离或深度增大时输出不上升。
+本地烈度仍是快速估算，不等同震后结合台站波形和现场调查形成的官方烈度图。系统提供三条独立路径：旧算法保留原分段经验公式；新算法是一套全范围连续公式，固定融合 Yu et al. (2013) 预测的 PGA/PGV 与基于官方强震记录拟合的单调轻量基线，并使用 GB/T 17742-2020 附录 A 的 IA、IV 公式进行连续换算；模型算法则使用国家地震科学数据中心大陆强震动记录离线训练的轻量模型。新算法不调用旧算法，也不使用机器学习、地形、Vs30、断层参数或运行时外部查询。
 
 接收地点的场地条件来自 GeoSCK 2026 中国大陆 Vs30 图，该图融合 7,939 个工程钻孔、30 弧秒地形坡度和 1:150 万地质图。项目只携带由原图生成的一弧分紧凑索引：压缩约 2.1 MB，首次加载约占 7.8 MB 内存；订阅规范化时常数时间查表并把结果写入地点，地震到达时不访问网络或磁盘。客户端传入的场地字段会被权威索引覆盖，索引覆盖范围外自动不修正。数据来源、许可和处理方式见 `site_data/ATTRIBUTION.md`，生成器位于 `tools/build_site_grid.py`。
 
-场地层以 GeoSCK 中国大陆均值约 `412 m/s` 为中性点。由于发布的地图不含逐格不确定度，代理数据默认只使用 `0.65` 可信权重；场地单独修正限制在 `±0.25` 度，强震时进一步衰减，并继续受主模型总 `±0.8` 度边界约束。M<4、境外、深度或距离超出训练域、缺少有效输入及非有限输出都会自动回退到稳定公式。`alert.intensity_model_mode` 支持 `legacy`、`active`、`gbt2020`、`hybrid` 和 `shadow`：`active` 保留此前直接预测烈度的模型，`gbt2020` 使用纯国标换算，`hybrid` 使用国标混合校准；默认 `shadow` 计算 hybrid 候选并把预测 PGA/PGV、国标烈度、场地参数、模型版本与回退原因写入投递审计，但不改变真实筛选或通知。
+场地层以 GeoSCK 中国大陆均值约 `412 m/s` 为中性点，仅供模型算法使用。由于发布的地图不含逐格不确定度，代理数据默认只使用 `0.65` 可信权重；场地单独修正限制在 `±0.25` 度，并继续受模型总 `±0.8` 度边界约束。新算法不应用这些修正，也不受模型的 ±0.8 度边界约束；对所有数据源、有效震级、深度和距离都直接给出新算法结果，不回退旧算法。由于国标公式 A.7 是面向台站实测 PGA/PGV 的分段规则，将两项独立预测值直接代入会在 6.0 附近出现向下跳变；新算法保留附录 A 的 IA、IV 计算式并使用连续平均值，再按官方记录回放确定的固定 `40%` 衰减结果、`60%` 单调基线进行融合。深度超过 Yu 公式的 15 km 参考深度时，以等效震中距保持震源距一致。
 
-管理员可在“系统概览 → 烈度算法”中运行时切换五种模式，设置持久化到订阅数据库同目录的 `intensity-model.json`，无需重启且只影响之后收到的地震。切换到任一真实启用模式前管理页会再次确认；`EEW_INTENSITY_MODEL_MODE` 的强制覆盖优先级最高，启用时管理页只读，便于异常时从服务器侧快速切回 `legacy`。原模型生成器位于 `tools/train_intensity_model.py`，国标模型生成器位于 `tools/train_gbt_intensity_model.py`，生成文件包含数据摘要和固定模型版本。
+管理员可在“系统概览 → 烈度算法”中运行时切换旧算法、新算法和模型算法，设置持久化到订阅数据库同目录的 `intensity-model.json`，无需重启且只影响之后收到的地震。`EEW_INTENSITY_MODEL_MODE` 的强制覆盖优先级最高；旧版 `hybrid` 配置会自动迁移到新算法。模型生成器位于 `tools/train_intensity_model.py`。
 
 P/S 到达时间也只是基于可获取数据的快速估算，不使用完整地壳速度结构、TauP、IASP91 或区域三维速度模型。
 
@@ -251,7 +261,7 @@ P/S 到达时间也只是基于可获取数据的快速估算，不使用完整�
 ```yaml
 alert:
   push_updates: true
-  intensity_model_mode: shadow
+  intensity_model_mode: legacy
   intensity_model_max_correction: 0.8
   revision_magnitude_delta: 0.3
   revision_epicenter_km: 10

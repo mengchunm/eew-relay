@@ -397,20 +397,34 @@ type Event struct {
 }
 
 type HistoryRecord struct {
-	Source             string   `json:"source"`
-	Key                string   `json:"key"`
-	EventID            string   `json:"event_id"`
-	OriginTime         string   `json:"origin_time"`
-	Hypocenter         string   `json:"hypocenter"`
-	Latitude           float64  `json:"latitude"`
-	Longitude          float64  `json:"longitude"`
-	Magnitude          float64  `json:"magnitude"`
-	DepthKM            float64  `json:"depth_km"`
-	MaxIntensity       string   `json:"max_intensity"`
-	Note               string   `json:"note,omitempty"`
-	EstimatedIntensity Decimal1 `json:"estimated_intensity"`
-	DistanceKM         float64  `json:"distance_km,omitempty"`
-	HypocentralKM      float64  `json:"hypocentral_km,omitempty"`
+	Source                string                      `json:"source"`
+	Key                   string                      `json:"key"`
+	EventID               string                      `json:"event_id"`
+	OriginTime            string                      `json:"origin_time"`
+	Hypocenter            string                      `json:"hypocenter"`
+	Latitude              float64                     `json:"latitude"`
+	Longitude             float64                     `json:"longitude"`
+	Magnitude             float64                     `json:"magnitude"`
+	DepthKM               float64                     `json:"depth_km"`
+	MaxIntensity          string                      `json:"max_intensity"`
+	Note                  string                      `json:"note,omitempty"`
+	EstimatedIntensity    Decimal1                    `json:"estimated_intensity"`
+	DistanceKM            float64                     `json:"distance_km,omitempty"`
+	HypocentralKM         float64                     `json:"hypocentral_km,omitempty"`
+	IntensityModelMode    string                      `json:"intensity_model_mode,omitempty"`
+	IntensityModelName    string                      `json:"intensity_model_name,omitempty"`
+	IntensityModelVersion string                      `json:"intensity_model_version,omitempty"`
+	Algorithms            []IntensityAlgorithmPreview `json:"algorithms,omitempty"`
+}
+
+type IntensityAlgorithmPreview struct {
+	Mode      string   `json:"mode"`
+	Name      string   `json:"name"`
+	Value     Decimal1 `json:"value"`
+	Available bool     `json:"available"`
+	Selected  bool     `json:"selected"`
+	Version   string   `json:"version"`
+	Reason    string   `json:"reason,omitempty"`
 }
 
 type OfficialReport struct {
@@ -742,16 +756,19 @@ func loadConfig(path string) (Config, error) {
 	}
 	if value := strings.TrimSpace(os.Getenv("EEW_INTENSITY_MODEL_MODE")); value != "" {
 		cfg.Alert.IntensityModelMode = value
-		cfg.intensityModelModeOverride = strings.ToLower(value)
 	}
 	rawIntensityMode := strings.ToLower(strings.TrimSpace(cfg.Alert.IntensityModelMode))
 	if rawIntensityMode == "" {
-		rawIntensityMode = intensityModelModeShadow
+		rawIntensityMode = intensityModelModeLegacy
 	}
-	if _, err := validateIntensityModelMode(rawIntensityMode); err != nil {
-		return Config{}, errors.New("alert.intensity_model_mode must be legacy, shadow, active, gbt2020, or hybrid")
+	intensityMode, err := validateIntensityModelMode(rawIntensityMode)
+	if err != nil {
+		return Config{}, errors.New("alert.intensity_model_mode must be legacy, active, gbt2020, or shadow")
 	}
-	cfg.Alert.IntensityModelMode = rawIntensityMode
+	cfg.Alert.IntensityModelMode = intensityMode
+	if strings.TrimSpace(os.Getenv("EEW_INTENSITY_MODEL_MODE")) != "" {
+		cfg.intensityModelModeOverride = intensityMode
+	}
 	if cfg.Alert.IntensityModelMaxCorrection <= 0 {
 		cfg.Alert.IntensityModelMaxCorrection = defaultModelCorrection
 	}
@@ -3519,7 +3536,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     .simulate{line-height:1.1}.btn-title{font-weight:900}.btn-sub{font-size:12px;color:var(--muted);font-weight:800}.primary .btn-sub{color:rgba(255,255,255,.86)}
     .primary{background:var(--red);color:#fff}.secondary{background:var(--soft);color:var(--text);border:1px solid var(--line)}.status{display:none;position:fixed;right:16px;bottom:16px;z-index:1000;width:min(calc(100% - 32px),560px);align-items:flex-start;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 12px 32px rgba(16,24,40,.18);line-height:1.5}.status.show{display:flex}.status-text{flex:1}.status-close{flex:0 0 auto;width:28px;height:28px;margin:-2px -4px -2px 0;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);font-size:22px;line-height:1;cursor:pointer}.status-close:hover{background:var(--soft);color:var(--text)}.ok{color:var(--ok)}.err{color:var(--red)}
     .history-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.history-head .muted{font-size:14px}.history-tools{display:grid;grid-template-columns:120px 120px auto;gap:8px;margin-bottom:12px}.history-tools select{height:42px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px;font:inherit}.history-tools button{height:42px;padding:0 14px}.history-list,.major-list{display:grid;gap:10px}.history-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);line-height:1.5}.pager{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;margin-top:12px}.pager button{height:40px;padding:0 14px}.pager button:disabled{opacity:.45}.page-info{color:var(--muted);font-size:13px}
-    .history-item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--soft)}.history-title{font-weight:900;margin-bottom:5px}.history-meta{display:flex;flex-wrap:wrap;gap:6px 10px;color:var(--muted);font-size:13px;line-height:1.4}.badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:rgba(23,92,211,.12);color:var(--blue);font-weight:900;font-size:12px;text-transform:uppercase}.estimate{color:var(--red);font-weight:900}.history-test{min-width:108px;height:42px;padding:0 12px}.history-note{margin-top:10px;color:var(--warn);font-size:13px;line-height:1.5}
+    .history-item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--soft)}.history-title{font-weight:900;margin-bottom:5px}.history-meta{display:flex;flex-wrap:wrap;gap:6px 10px;color:var(--muted);font-size:13px;line-height:1.4}.algorithm-results{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.algorithm-result{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font-size:12px;font-weight:800}.algorithm-result.selected{border-color:rgba(23,92,211,.45);background:rgba(23,92,211,.09);color:var(--blue)}.algorithm-result.unavailable{border-style:dashed;color:var(--warn)}.badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:rgba(23,92,211,.12);color:var(--blue);font-weight:900;font-size:12px;text-transform:uppercase}.estimate{color:var(--red);font-weight:900}.history-test{min-width:108px;height:42px;padding:0 12px}.history-note{margin-top:10px;color:var(--warn);font-size:13px;line-height:1.5}
     @media(max-width:560px){input,select,textarea{font-size:16px}.access-form{grid-template-columns:1fr}.access-form button{width:100%}.actions{grid-template-columns:1fr 1fr}.actions .btn{grid-column:1/-1}dl{grid-template-columns:88px 1fr}.threshold-row{grid-template-columns:1fr}.rule-row{grid-template-columns:minmax(0,1fr) 64px;gap:8px;padding:12px 10px;align-items:center;justify-content:stretch}.range-fields{grid-column:1/-1;grid-row:1;grid-template-columns:auto 1fr;gap:8px;justify-content:stretch;min-height:44px;align-items:center}.band-choice{grid-column:1/2;grid-row:2;min-height:44px;padding:8px 10px}.level-test{grid-column:2/3;grid-row:2;width:100%;height:44px;min-width:0;padding:0 6px}.band-main{font-size:14px}.band-sub{font-size:12px}.history-head{display:block}.history-tools{grid-template-columns:1fr 1fr}.history-tools button{grid-column:1/-1}.history-item{grid-template-columns:1fr}.history-test{width:100%}.pager{grid-template-columns:1fr 1fr}.page-info{grid-column:1/-1}}
   </style>
 </head>
@@ -3549,7 +3566,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
       <div class="threshold-row">
         <div>
           <div class="setting-title">当前通知规则</div>
-          <div class="setting-note">这里只展示订阅页保存的规则。需要修改位置或通知级别时，请返回订阅页更新。</div>
+          <div class="setting-note">这里的按钮验证静音、普通、响铃三个通知档位，烈度会按档位固定，不用于比较算法。算法结果请查看下方历史地震。</div>
         </div>
         <a class="btn secondary" href="/">修改配置</a>
       </div>
@@ -3564,7 +3581,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     <div class="history-head">
       <div>
         <h2>历史真实数据测试</h2>
-        <div class="muted">默认显示本地缓存中的最新 5 条；Wolfx 历史接口不支持任意历史搜索，因此这里不提供搜索框。</div>
+        <div class="muted">每条记录同时计算旧算法、新算法和模型算法；“当前”标记表示生产正在使用的算法，新算法覆盖全部有效地震参数。</div>
       </div>
     </div>
     <div class="history-tools">
@@ -3682,6 +3699,19 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
     const key=String(source||"").toLowerCase();
     return key==="major"?"历史地震":String(source||"").toUpperCase();
   }
+  function algorithmReason(reason){
+    return ({legacy_mode:"当前为旧算法",region_out_of_domain:"不适用于该数据源或区域",distance_out_of_domain:"超出建议距离",magnitude_out_of_domain:"震级超出适用范围",depth_out_of_domain:"深度超出适用范围",depth_missing:"缺少深度",non_finite_input:"地震参数无效"})[String(reason||"")]||String(reason||"算法不适用");
+  }
+  function renderAlgorithmResults(record){
+    const algorithms=Array.isArray(record.algorithms)?record.algorithms:[];
+    if(!algorithms.length)return "";
+    return '<div class="algorithm-results" aria-label="烈度算法对比">'+algorithms.map(function(item){
+      const classes='algorithm-result'+(item.selected?' selected':'')+(!item.available?' unavailable':'');
+      const text=item.available?item.name+' '+Number(item.value||0).toFixed(1):item.name+'：'+algorithmReason(item.reason);
+      const title=(item.selected?'当前启用 · ':'')+(item.version||item.name)+(item.reason?' · '+algorithmReason(item.reason):'');
+      return '<span class="'+classes+'" title="'+escapeHTML(title)+'">'+escapeHTML(text)+(item.selected?' · 当前':'')+'</span>';
+    }).join('')+'</div>';
+  }
   function renderHistory(target, records, emptyText){
     if(!records||!records.length){
       target.innerHTML='<div class="history-empty">'+escapeHTML(emptyText||"暂无可用历史地震数据。")+'</div>';
@@ -3699,7 +3729,7 @@ var managePageTemplate = template.Must(template.New("manage").Parse(`<!doctype h
       const time=escapeHTML(r.origin_time||"未知时间");
       const note=r.note?'<span>'+escapeHTML(r.note)+'</span>':'';
 	  const buttonText=notifyLevel?'用此测试':'未达到通知烈度';
-	  return '<article class="history-item"><div><div class="history-title"><span class="badge">'+source+'</span> '+title+'</div><div class="history-meta"><span>'+time+'</span><span>M'+mag+'</span><span>深度 '+depth+'km</span><span>最大烈度 '+intensity+'</span><span class="estimate">订阅地预估烈度 '+escapeHTML(estimated)+'</span><span>震中距 '+escapeHTML(distance)+'</span>'+note+'</div></div><button class="secondary history-test" type="button" data-source="'+escapeHTML(r.source)+'" data-key="'+escapeHTML(r.key)+'" data-estimated-intensity="'+escapeHTML(estimated)+'" data-notify-level="'+escapeHTML(notifyLevel)+'">'+buttonText+'</button></article>';
+	  return '<article class="history-item"><div><div class="history-title"><span class="badge">'+source+'</span> '+title+'</div><div class="history-meta"><span>'+time+'</span><span>M'+mag+'</span><span>深度 '+depth+'km</span><span>最大烈度 '+intensity+'</span><span class="estimate">当前算法预估 '+escapeHTML(estimated)+'</span><span>震中距 '+escapeHTML(distance)+'</span>'+note+'</div>'+renderAlgorithmResults(r)+'</div><button class="secondary history-test" type="button" data-source="'+escapeHTML(r.source)+'" data-key="'+escapeHTML(r.key)+'" data-estimated-intensity="'+escapeHTML(estimated)+'" data-notify-level="'+escapeHTML(notifyLevel)+'">'+buttonText+'</button></article>';
     }).join("");
   }
   async function loadHistory(forceRefresh){
@@ -5804,12 +5834,50 @@ func annotateHistoryRecords(cfg Config, sub Subscription, records []HistoryRecor
 	copy(annotated, records)
 	for i := range annotated {
 		event := historicalEvent(annotated[i])
-		_, decision := nearestSubscriptionForEvent(cfg, sub, event)
+		selectedSub, decision := nearestSubscriptionForEvent(cfg, sub, event)
 		annotated[i].EstimatedIntensity = Decimal1(decision.EstimatedIntensity)
 		annotated[i].DistanceKM = round1(decision.DistanceKM)
 		annotated[i].HypocentralKM = round1(decision.HypocentralKM)
+		annotated[i].IntensityModelMode = decision.IntensityModelMode
+		annotated[i].IntensityModelName = intensityAlgorithmName(decision.IntensityModelMode)
+		annotated[i].IntensityModelVersion = decision.IntensityModelVersion
+		annotated[i].Algorithms = previewIntensityAlgorithms(cfg, selectedSub, event, decision.IntensityModelMode)
 	}
 	return annotated
+}
+
+func previewIntensityAlgorithms(cfg Config, sub Subscription, event Event, selectedMode string) []IntensityAlgorithmPreview {
+	modes := []string{intensityModelModeLegacy, intensityModelModeGBT2020, intensityModelModeActive}
+	previews := make([]IntensityAlgorithmPreview, 0, len(modes))
+	for _, mode := range modes {
+		previewCfg := cfg
+		previewCfg.intensityModelSettings = nil
+		previewCfg.intensityModelModeOverride = ""
+		previewCfg.Alert.IntensityModelMode = mode
+		_, decision := nearestSubscriptionForEvent(previewCfg, sub, event)
+		available := mode == intensityModelModeLegacy || decision.IntensityModelUsed
+		previews = append(previews, IntensityAlgorithmPreview{
+			Mode:      mode,
+			Name:      intensityAlgorithmName(mode),
+			Value:     Decimal1(decision.EstimatedIntensity),
+			Available: available,
+			Selected:  mode == selectedMode,
+			Version:   decision.IntensityModelVersion,
+			Reason:    decision.IntensityFallbackReason,
+		})
+	}
+	return previews
+}
+
+func intensityAlgorithmName(mode string) string {
+	switch normalizeIntensityModelMode(mode) {
+	case intensityModelModeGBT2020:
+		return "新算法"
+	case intensityModelModeActive:
+		return "模型算法"
+	default:
+		return "旧算法"
+	}
 }
 
 func historyRecordFromRaw(source, key string, raw RawEvent) (HistoryRecord, bool) {
@@ -5907,6 +5975,7 @@ func isHistoryTestEvent(event Event) bool {
 func evaluate(cfg Config, sub Subscription, event Event) Decision {
 	dist := haversineKM(sub.Latitude, sub.Longitude, event.Latitude, event.Longitude)
 	hypo := math.Sqrt(dist*dist + event.DepthKM*event.DepthKM)
+	azimuth := initialBearingDegrees(event.Latitude, event.Longitude, sub.Latitude, sub.Longitude)
 	origin := event.OriginTime
 	if origin.IsZero() {
 		origin = time.Now()
@@ -5915,7 +5984,7 @@ func evaluate(cfg Config, sub Subscription, event Event) Decision {
 	pArrival := origin.Add(time.Duration(pSeconds * float64(time.Second)))
 	sArrival := origin.Add(time.Duration(sSeconds * float64(time.Second)))
 	now := time.Now()
-	intensity := predictIntensity(cfg, event, dist, hypo, SiteCondition{
+	intensity := predictIntensity(cfg, event, dist, hypo, azimuth, SiteCondition{
 		VS30:        sub.SiteVS30,
 		Uncertainty: sub.SiteUncertainty,
 		Version:     sub.SiteDataVersion,

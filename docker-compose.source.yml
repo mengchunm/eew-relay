@@ -1,0 +1,6 @@
+services:
+  eew-bark:
+    image: eew-bark:local
+    build:
+      context: .
+      dockerfile: Dockerfile

@@ -22,7 +22,7 @@ func TestIntensityModelSettingsPersistAndTakeEffectImmediately(t *testing.T) {
 	}
 	cfg.intensityModelSettings = store
 	event := Event{Type: "cenc_eew", Magnitude: 5.8, DepthKM: 12, Latitude: 30.7, Longitude: 103.9}
-	shadow := predictIntensity(cfg, event, 80, math.Sqrt(80*80+12*12), SiteCondition{})
+	shadow := predictIntensity(cfg, event, 80, math.Sqrt(80*80+12*12), 0, SiteCondition{})
 	if shadow.Mode != intensityModelModeShadow || shadow.Selected != shadow.Legacy {
 		t.Fatalf("unexpected initial prediction: %#v", shadow)
 	}
@@ -34,7 +34,7 @@ func TestIntensityModelSettingsPersistAndTakeEffectImmediately(t *testing.T) {
 	if updated.Mode != intensityModelModeActive || updated.UpdatedAt == "" {
 		t.Fatalf("unexpected updated settings: %#v", updated)
 	}
-	active := predictIntensity(cfg, event, 80, math.Sqrt(80*80+12*12), SiteCondition{})
+	active := predictIntensity(cfg, event, 80, math.Sqrt(80*80+12*12), 0, SiteCondition{})
 	if active.Mode != intensityModelModeActive || active.Selected != active.Candidate {
 		t.Fatalf("runtime update did not take effect: %#v", active)
 	}
@@ -75,22 +75,24 @@ func TestIntensityModelSettingsAcceptAllPublishedModes(t *testing.T) {
 		intensityModelModeShadow,
 		intensityModelModeActive,
 		intensityModelModeGBT2020,
-		intensityModelModeHybrid,
 	} {
 		if got, err := validateIntensityModelMode(mode); err != nil || got != mode {
 			t.Fatalf("mode %q was rejected: got=%q err=%v", mode, got, err)
 		}
+	}
+	if got, err := validateIntensityModelMode(intensityModelModeHybrid); err != nil || got != intensityModelModeGBT2020 {
+		t.Fatalf("legacy hybrid mode was not migrated: got=%q err=%v", got, err)
 	}
 }
 
 func TestIntensityModelSettingsReportModeSpecificVersion(t *testing.T) {
 	cfg := Config{Alert: AlertConfig{IntensityModelMode: intensityModelModeGBT2020}}
 	settings := intensityModelSettings(cfg)
-	if settings.ModelVersion != gbtIntensityModelVersion || settings.StandardName != gbtIntensityStandardName {
+	if settings.ModelVersion != yu2013IntensityAlgorithmVersion || settings.StandardName != gbtIntensityStandardName {
 		t.Fatalf("unexpected GBT metadata: %#v", settings)
 	}
 	if settings.ModelVersions[intensityModelModeActive] != officialIntensityModelVersion ||
-		settings.ModelVersions[intensityModelModeHybrid] != gbtIntensityModelVersion {
+		settings.ModelVersions[intensityModelModeGBT2020] != yu2013IntensityAlgorithmVersion {
 		t.Fatalf("missing available model versions: %#v", settings.ModelVersions)
 	}
 }

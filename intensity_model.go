@@ -10,8 +10,9 @@ const (
 	intensityModelModeShadow  = "shadow"
 	intensityModelModeActive  = "active"
 	intensityModelModeGBT2020 = "gbt2020"
-	intensityModelModeHybrid  = "hybrid"
-	defaultModelCorrection    = 0.8
+	// hybrid is retained only as a persisted-configuration migration alias.
+	intensityModelModeHybrid = "hybrid"
+	defaultModelCorrection   = 0.8
 )
 
 type intensityPrediction struct {
@@ -43,13 +44,15 @@ func normalizeIntensityModelMode(value string) string {
 	case intensityModelModeGBT2020:
 		return intensityModelModeGBT2020
 	case intensityModelModeHybrid:
-		return intensityModelModeHybrid
-	default:
+		return intensityModelModeGBT2020
+	case intensityModelModeShadow:
 		return intensityModelModeShadow
+	default:
+		return intensityModelModeLegacy
 	}
 }
 
-func predictIntensity(cfg Config, event Event, epicentralKM, hypocentralKM float64, site SiteCondition) intensityPrediction {
+func predictIntensity(cfg Config, event Event, epicentralKM, hypocentralKM, azimuthDegrees float64, site SiteCondition) intensityPrediction {
 	settings := intensityModelSettings(cfg)
 	mode := settings.Mode
 	legacy := estimateIntensity(event.Magnitude, hypocentralKM)
@@ -64,36 +67,46 @@ func predictIntensity(cfg Config, event Event, epicentralKM, hypocentralKM float
 		SiteVS30:        site.VS30,
 		SiteUncertainty: site.Uncertainty,
 	}
+	if mode != intensityModelModeActive {
+		result.SiteVS30 = 0
+		result.SiteUncertainty = 0
+	}
 	if mode == intensityModelModeLegacy {
 		result.FallbackReason = "legacy_mode"
 		return result
 	}
 
-	var modelValue, standardValue, calibrationValue, predictedPGA, predictedPGV float64
+	var modelValue, standardValue, predictedPGA, predictedPGV float64
 	var reason string
 	switch mode {
 	case intensityModelModeActive:
 		modelValue, reason = officialIntensityModel(event, epicentralKM)
 	case intensityModelModeGBT2020:
-		standardValue, calibrationValue, predictedPGA, predictedPGV, reason = gbtIntensityModel(event, epicentralKM)
+		standardValue, predictedPGA, predictedPGV, reason = yu2013Intensity(event, epicentralKM, azimuthDegrees)
 		modelValue = standardValue
-	case intensityModelModeShadow, intensityModelModeHybrid:
-		standardValue, calibrationValue, predictedPGA, predictedPGV, reason = gbtIntensityModel(event, epicentralKM)
-		modelValue = hybridGBTIntensity(standardValue, calibrationValue)
+	case intensityModelModeShadow:
+		standardValue, predictedPGA, predictedPGV, reason = yu2013Intensity(event, epicentralKM, azimuthDegrees)
+		modelValue = standardValue
 	}
 	if reason != "" {
 		result.FallbackReason = reason
-		if mode != intensityModelModeShadow {
+		if mode == intensityModelModeActive {
 			result.Selected = baseline
 		}
 		return roundedIntensityPrediction(result)
 	}
 	result.Model = modelValue
 	result.Standard = standardValue
-	result.Calibration = calibrationValue
 	result.PredictedPGA = predictedPGA
 	result.PredictedPGV = predictedPGV
 	result.UsedModel = true
+	if mode == intensityModelModeGBT2020 || mode == intensityModelModeShadow {
+		result.Candidate = clampFloat(modelValue, 1, 12)
+		if mode == intensityModelModeGBT2020 {
+			result.Selected = result.Candidate
+		}
+		return roundedIntensityPrediction(result)
+	}
 	maxCorrection := settings.MaxCorrection
 	if maxCorrection <= 0 || maxCorrection > 2 {
 		maxCorrection = defaultModelCorrection
@@ -129,8 +142,8 @@ func intensityModelVersionForMode(mode string) string {
 	if mode == intensityModelModeActive {
 		return officialIntensityModelVersion
 	}
-	if mode == intensityModelModeGBT2020 || mode == intensityModelModeHybrid || mode == intensityModelModeShadow {
-		return gbtIntensityModelVersion
+	if mode == intensityModelModeGBT2020 || mode == intensityModelModeShadow {
+		return yu2013IntensityAlgorithmVersion
 	}
 	return "legacy"
 }
@@ -149,77 +162,19 @@ func gbtInstrumentalIntensity(pgaMPS2, pgvMPS float64) float64 {
 	return clampFloat(value, 1, 12)
 }
 
-func hybridGBTIntensity(standard, calibration float64) float64 {
-	if standard <= 0 || calibration <= 0 {
+// gbtPredictiveIntensity uses the two component equations from Appendix A of
+// GB/T 17742-2020, but keeps their average continuous across the 6.0 switch.
+// Formula A.7 is defined for measured station waveforms and can step downward
+// when fed independently predicted PGA and PGV. A continuous conversion is
+// required here so a larger magnitude cannot produce a smaller alert value.
+func gbtPredictiveIntensity(pgaMPS2, pgvMPS float64) float64 {
+	if pgaMPS2 <= 0 || pgvMPS <= 0 || math.IsNaN(pgaMPS2) || math.IsNaN(pgvMPS) ||
+		math.IsInf(pgaMPS2, 0) || math.IsInf(pgvMPS, 0) {
 		return 0
 	}
-	blended := (1-gbtHybridDirectWeight)*standard + gbtHybridDirectWeight*calibration
-	return clampFloat(blended, standard-gbtHybridMaxCalibration, standard+gbtHybridMaxCalibration)
-}
-
-func gbtIntensityModel(event Event, epicentralKM float64) (standard, calibration, pgaMPS2, pgvMPS float64, reason string) {
-	if reason = gbtIntensityModelDomainReason(event, epicentralKM); reason != "" {
-		return 0, 0, 0, 0, reason
-	}
-	features := [...]float64{event.Magnitude, math.Log(epicentralKM + 7), event.DepthKM, event.Latitude, event.Longitude}
-	logPGA := predictGBTTreeModel(features, gbtPGAModelBase, gbtPGAModelRoots[:], gbtPGAModelNodes[:])
-	logPGV := predictGBTTreeModel(features, gbtPGVModelBase, gbtPGVModelRoots[:], gbtPGVModelNodes[:])
-	calibration = predictGBTTreeModel(features, gbtCalibrationModelBase, gbtCalibrationModelRoots[:], gbtCalibrationModelNodes[:])
-	pgaMPS2 = math.Pow(10, logPGA)
-	pgvMPS = math.Pow(10, logPGV)
-	standard = gbtInstrumentalIntensity(pgaMPS2, pgvMPS)
-	if standard <= 0 || math.IsNaN(calibration) || math.IsInf(calibration, 0) {
-		return 0, 0, 0, 0, "non_finite_model_output"
-	}
-	return standard, clampFloat(calibration, 1, 12), pgaMPS2, pgvMPS, ""
-}
-
-func predictGBTTreeModel(features [5]float64, base float64, roots []uint16, nodes []gbtIntensityModelNode) float64 {
-	value := base
-	for _, root := range roots {
-		index := root
-		for {
-			node := nodes[index]
-			if node.Feature < 0 {
-				value += float64(node.Value)
-				break
-			}
-			feature := features[node.Feature]
-			if (math.IsNaN(feature) && node.MissingLeft) || feature <= float64(node.Threshold) {
-				index = node.Left
-			} else {
-				index = node.Right
-			}
-		}
-	}
-	return value
-}
-
-func gbtIntensityModelDomainReason(event Event, epicentralKM float64) string {
-	if math.IsNaN(event.Magnitude) || math.IsInf(event.Magnitude, 0) ||
-		math.IsNaN(event.DepthKM) || math.IsInf(event.DepthKM, 0) ||
-		math.IsNaN(event.Latitude) || math.IsInf(event.Latitude, 0) ||
-		math.IsNaN(event.Longitude) || math.IsInf(event.Longitude, 0) ||
-		math.IsNaN(epicentralKM) || math.IsInf(epicentralKM, 0) {
-		return "non_finite_input"
-	}
-	if event.Magnitude < 4 || event.Magnitude > 8 {
-		return "magnitude_out_of_domain"
-	}
-	if event.DepthKM <= 0 {
-		return "depth_missing"
-	}
-	if event.DepthKM > 100 {
-		return "depth_out_of_domain"
-	}
-	if epicentralKM < 0 || epicentralKM > 700 {
-		return "distance_out_of_domain"
-	}
-	if event.Latitude < gbtIntensityModelMinLatitude || event.Latitude > gbtIntensityModelMaxLatitude ||
-		event.Longitude < gbtIntensityModelMinLongitude || event.Longitude > gbtIntensityModelMaxLongitude {
-		return "region_out_of_domain"
-	}
-	return ""
+	acceleration := 3.17*math.Log10(pgaMPS2) + 6.59
+	velocity := 3.00*math.Log10(pgvMPS) + 9.77
+	return clampFloat((acceleration+velocity)/2, 0, 12)
 }
 
 func stableIntensityBaseline(magnitude, epicentralKM float64) float64 {

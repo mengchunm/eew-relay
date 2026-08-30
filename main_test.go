@@ -353,6 +353,28 @@ func TestSimulationAndHistoryPreviewsUseSubscriberLocation(t *testing.T) {
 	if len(records) != 1 || records[0].DistanceKM <= 0 || records[0].HypocentralKM <= records[0].DistanceKM {
 		t.Fatalf("bad annotated history record: %#v", records)
 	}
+	if len(records[0].Algorithms) != 3 {
+		t.Fatalf("history preview should compare all algorithms: %#v", records[0])
+	}
+	if records[0].Algorithms[1].Mode != intensityModelModeGBT2020 || !records[0].Algorithms[1].Available {
+		t.Fatalf("CENC history preview should run the new algorithm: %#v", records[0].Algorithms)
+	}
+}
+
+func TestHistoryPreviewProvidesNewAlgorithmForEverySource(t *testing.T) {
+	cfg := Config{Alert: AlertConfig{IntensityModelMode: intensityModelModeGBT2020, SWaveKMS: 3.5, PWaveKMS: 6.0}}
+	sub := Subscription{Latitude: 35.6762, Longitude: 139.6503}
+	normalizeSubscription(&sub)
+	records := annotateHistoryRecords(cfg, sub, []HistoryRecord{{
+		Source: "jma", Key: "No1", EventID: "jma-x", Latitude: 35.7, Longitude: 139.7, Magnitude: 5.5, DepthKM: 10,
+	}})
+	if len(records) != 1 || len(records[0].Algorithms) != 3 {
+		t.Fatalf("bad annotated JMA record: %#v", records)
+	}
+	newAlgorithm := records[0].Algorithms[1]
+	if !newAlgorithm.Available || newAlgorithm.Reason != "" {
+		t.Fatalf("new algorithm must cover JMA history without fallback: %#v", newAlgorithm)
+	}
 }
 
 func TestNearestSubscriptionLocationForEvent(t *testing.T) {
